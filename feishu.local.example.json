@@ -1,0 +1,9 @@
+{
+  "appId": "${FEISHU_APP_ID}",
+  "appSecret": "${FEISHU_APP_SECRET}",
+  "logLevel": "info",
+  "directory": "${OPENCODE_WORKSPACE}",
+  "workspaceRoots": ["${OPENCODE_WORKSPACE}"],
+  "serverUsername": "opencode",
+  "serverPassword": "${OPENCODE_SERVER_PASSWORD}"
+}

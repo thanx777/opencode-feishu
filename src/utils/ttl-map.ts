@@ -69,4 +69,40 @@ export class TtlMap<V> {
     }
     this.data.delete(key)
   }
+
+  /**
+   * 列出所有尚未过期的 key。返回的是快照，后续删除/写入不会反映到返回值。
+   *
+   * 主要用于需要遍历所有活跃条目做清理或广播的场景（如 pinned status
+   * 需要知道"当前所有 chat 的 binding"）。
+   */
+  keys(): string[] {
+    return Array.from(this.data.keys())
+  }
+
+  /**
+   * 列出所有尚未过期的 value。返回的是快照。
+   */
+  values(): V[] {
+    return Array.from(this.data.values())
+  }
+
+  /**
+   * 列出所有尚未过期的 [key, value] 对。返回的是快照。
+   */
+  entries(): Array<[string, V]> {
+    return Array.from(this.data.entries())
+  }
+
+  /**
+   * 清空所有条目，并清理所有定时器。
+   * 主要用于测试场景。
+   */
+  clear(): void {
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer)
+    }
+    this.timers.clear()
+    this.data.clear()
+  }
 }

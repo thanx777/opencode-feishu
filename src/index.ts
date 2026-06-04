@@ -7,7 +7,8 @@
  * 3. 获取 bot 自身 open_id（用于群聊 @提及检测）
  * 4. 启动飞书 WebSocket 长连接网关
  * 5. 注册 OpenCode 事件钩子（SSE 事件处理、tool 注册、最小运行时 prompt 注入）
- * 6. 导出 FeishuPlugin 供 OpenCode 加载
+ * 6. 读取 workspaceRoots 配置（feishu.json），用于 /dir 命令的工程扫描
+ * 7. 导出 FeishuPlugin 供 OpenCode 加载
  *
  * 插件不是独立服务——由 OpenCode 管理其生命周期。
  */
@@ -63,6 +64,83 @@ function otelStderrLinePrefix(level: "info" | "warn" | "error"): string {
 }
 
 /**
+ * 从 feishu.json 解析出最终的 workspaceRoots 列表。
+ *
+ * 优先级：
+ * 1. feishu.json 中显式配置的 `workspaceRoots`（校验后已合法）
+ * 2. 缺省时回退到 `[resolvedConfig.directory]`
+ * 3. 每个 path 必须存在；不存在的会被静默丢弃（带 log.warn）
+ *
+ * 关键：不读 opencode.jsonc，避免与官方 schema 冲突。
+ */
+function resolveWorkspaceRoots(resolvedConfig: ResolvedConfig): string[] {
+  const configured = resolvedConfig.workspaceRoots
+  const candidates = configured && configured.length > 0
+    ? configured
+    : (resolvedConfig.directory ? [resolvedConfig.directory] : [])
+
+  const result: string[] = []
+  for (const r of candidates) {
+    if (!r || !r.trim()) continue
+    if (!existsSync(r)) {
+      // 用一个简易 stderr 输出兜底（log 此处不一定可用）
+      console.error(`[feishu] workspaceRoots 路径不存在，已跳过: ${r}`)
+      continue
+    }
+    result.push(r)
+  }
+  return result
+}
+
+/**
+ * 发送欢迎卡片到刚加入的群聊。
+ */
+async function sendWelcomeCard(
+  larkClient: InstanceType<typeof Lark.Client>,
+  chatId: string,
+  workspaceRoots: ReadonlyArray<string>,
+  log: LogFn,
+): Promise<void> {
+  const rootList = workspaceRoots.length > 0
+    ? workspaceRoots.map((r) => `• \`${r}\``).join("\n")
+    : "（未配置）"
+  const card = {
+    header: {
+      title: { tag: "plain_text", content: "👋 opencode 飞书机器人" },
+      template: "blue",
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: `你好！我是 opencode 飞书机器人。\n\n**可用工程根目录：**\n${rootList}`,
+        },
+      },
+      { tag: "hr" },
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: "**快速开始：**\n1. 发送 `/dir list` 查看所有可绑定工程\n2. 发送 `/dir <name>` 把此群绑定到 <name> 工程\n3. 绑定后开始对话即可\n\n**其他命令：**\n• `/dir` - 查看当前绑定\n• `/unbind` - 解除绑定\n• `/new` - 在当前工程创建新会话\n• `/history` - 查看历史会话",
+        },
+      },
+    ],
+  }
+  const res = await larkClient.im.message.create({
+    data: {
+      receive_id: chatId,
+      msg_type: "interactive",
+      content: JSON.stringify(card),
+    },
+    params: { receive_id_type: "chat_id" },
+  })
+  if (res.code !== 0) {
+    log("warn", "欢迎卡片返回非 0", { chatId, code: res.code, msg: res.msg })
+  }
+}
+
+/**
  * 从 prompts/ 目录加载飞书运行时 prompt（system prompt 片段）。
  *
  * 这里只注入飞书渠道事实和工具契约，不注入任何会塑形 agent 输出策略的维护文档。
@@ -112,11 +190,17 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     }).catch(() => {})
   }
 
-  const configPath = join(homedir(), ".config", "opencode", "plugins", "feishu.json")
+  // 优先使用项目内的 feishu.local.json，方便直接编辑；
+  // 如果不存在则回退到 ~/.config/opencode/plugins/feishu.json
+  const pluginDir = join(fileURLToPath(import.meta.url), "../..")
+  const localConfigPath = join(pluginDir, "feishu.local.json")
+  const globalConfigPath = join(homedir(), ".config", "opencode", "plugins", "feishu.json")
+  const configPath = existsSync(localConfigPath) ? localConfigPath : globalConfigPath
   let resolvedConfig: ResolvedConfig
   try {
     // 启动期一次性完成配置读取、环境变量展开和 schema 校验。
     resolvedConfig = loadAndValidateConfig(configPath, ctx.directory ?? "")
+    log("info", `配置加载自: ${configPath}`)
   } catch (e) {
     if (e instanceof z.ZodError) {
       const details = e.issues.map(i => `  - ${i.path.join(".")}: ${i.message}`).join("\n")
@@ -143,11 +227,40 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   // 获取 bot open_id（用于群聊 @提及检测）
   const botOpenId = await fetchBotOpenId(larkClient, log)
 
+  // opencode server Basic Auth: 如果用户配置了 serverPassword, 给所有客户端加 Authorization header
+  const serverAuthHeader = buildOpencodeServerAuthHeader(resolvedConfig, log)
+
   // v2 client 主要用于权限审批/问答交互回调。
-  const v2Client = createOpencodeClient({ directory: resolvedConfig.directory || undefined })
+  const v2Client = createOpencodeClient({
+    directory: resolvedConfig.directory || undefined,
+    headers: serverAuthHeader ? { Authorization: serverAuthHeader } : {},
+  })
   const interactiveDeps: InteractiveDeps = { feishuClient: larkClient, log, v2Client }
 
+  // ctx.client (in-process 客户端) 也需要 Auth —— 用 interceptor 注入
+  // OpencodeClient 类未公开 interceptors 字段, 但底层 Client 类型有
+  if (serverAuthHeader) {
+    const rawClient = client as unknown as {
+      interceptors?: {
+        request?: { use: (fn: (req: Request) => Promise<Request> | Request) => unknown }
+      }
+    }
+    if (rawClient.interceptors?.request?.use) {
+      rawClient.interceptors.request.use(async (request) => {
+        request.headers.set("Authorization", serverAuthHeader)
+        return request
+      })
+      log("info", "已为 ctx.client 注入 opencode server Auth header")
+    } else {
+      log("warn", "ctx.client 不支持 interceptors, 跳过 Auth 注入 (可能不需要)")
+    }
+  }
+
   // 启动飞书 WebSocket 网关（复用 larkClient）
+  // workspaceRoots 从 feishu.json 读取，缺失时回退到 [resolvedConfig.directory]
+  const workspaceRoots = resolveWorkspaceRoots(resolvedConfig)
+  log("info", "workspaceRoots 已加载", { count: workspaceRoots.length, roots: workspaceRoots })
+
   gateway = startFeishuGateway({
     config: resolvedConfig,
     larkClient,
@@ -164,17 +277,26 @@ export const FeishuPlugin: Plugin = async (ctx) => {
         cardkit,
         interactiveDeps,
         v2Client,
+        workspaceRoots,
+        larkClient,
       })
     },
     onBotAdded: (chatId) => {
       if (!gateway) return
-      // Bot 刚入群时异步补录历史消息，帮助模型建立初始上下文。
+      // Bot 刚入群时：异步补录历史消息 + 主动发送欢迎卡片
       ingestGroupHistory(larkClient, client, chatId, {
         maxMessages: resolvedConfig.maxHistoryMessages,
         log,
         directory: resolvedConfig.directory,
       }).catch((err) => {
         log("error", "群聊历史摄入失败", {
+          chatId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+      // 发送欢迎消息：引导用户 /dir 绑定工程
+      sendWelcomeCard(larkClient, chatId, workspaceRoots, log).catch((err) => {
+        log("error", "发送欢迎消息失败", {
           chatId,
           error: err instanceof Error ? err.message : String(err),
         })
@@ -197,7 +319,13 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     event: async ({ event }) => {
       // 只有网关可用时才消费 OpenCode SSE 事件。
       if (!gateway) return
-      await handleEvent(event, { log, directory: resolvedConfig.directory, client, nudge: resolvedConfig.nudge })
+      await handleEvent(event, {
+        log,
+        directory: resolvedConfig.directory,
+        client,
+        nudge: resolvedConfig.nudge,
+        larkClient, // PR2: 全局事件路由需要
+      })
     },
     tool: {
       feishu_send_card: createSendCardTool({ feishuClient: larkClient, log }),
@@ -268,6 +396,22 @@ export const FeishuPlugin: Plugin = async (ctx) => {
     },
   }
   return hooks
+}
+
+/**
+ * 构造 opencode server HTTP Basic Auth header 字符串。
+ * 如果用户没配 serverPassword, 返回 undefined (不发送 Auth, 适用于 127.0.0.1 本机访问)。
+ * 注意: feishu.json 里的 serverPassword 必须和 start-serve.bat 中 OPENCODE_SERVER_PASSWORD 保持一致。
+ */
+function buildOpencodeServerAuthHeader(
+  config: ResolvedConfig,
+  log: LogFn,
+): string | undefined {
+  if (!config.serverPassword) return undefined
+  const username = config.serverUsername ?? "opencode"
+  const token = Buffer.from(`${username}:${config.serverPassword}`).toString("base64")
+  log("info", "opencode server Basic Auth 已启用", { username })
+  return `Basic ${token}`
 }
 
 /**

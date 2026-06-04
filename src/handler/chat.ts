@@ -19,9 +19,10 @@ import {
   getSessionError, clearSessionError, clearRetryAttempts,
   clearNudge,
 } from "./event.js"
-import { SessionErrorDetected, extractSessionError, tryModelRecovery } from "./error-recovery.js"
+import { SessionErrorDetected, extractSessionError, tryModelRecovery, getGlobalDefaultModel } from "./error-recovery.js"
 import { classify, matchPluginError, toLog } from "./errors.js"
-import { buildSessionKey, getOrCreateSession, invalidateSession } from "../session.js"
+import { buildSessionKey, getOrCreateSession, invalidateSession, getCurrentSessionId } from "../session.js"
+import { extractSessionContext, setPendingContext, consumePendingContext } from "./context-transfer.js"
 import { registerSessionChat } from "../feishu/session-chat-map.js"
 import { extractParts, type PromptPart } from "../feishu/content-extractor.js"
 import { resolveUserName } from "../feishu/user-name.js"
@@ -48,6 +49,12 @@ import {
   deriveReplyTitleFromParts,
   type DetailPhaseSnapshot,
 } from "../feishu/result-card-view.js"
+import { handleDirCommand, type DirCommandDeps } from "../commands/dir.js"
+import { handleUnbindCommand } from "../commands/unbind.js"
+import { getChatProject, clearChatProject } from "../commands/chat-project-map.js"
+import { handleHistoryCommand } from "../commands/history.js"
+import { recordSessionDirectory } from "./session-project-cache.js"
+import { existsSync } from "node:fs"
 
 /**
  * 向 Langfuse 发送轻量 trace，关联 sessionId 和飞书 userId。
@@ -213,6 +220,10 @@ export interface ChatDeps {
   interactiveDeps?: InteractiveDeps
   /** v2 client（扁平参数），用于 v1 不支持的方法（如 deleteMessage）。 */
   v2Client?: V2OpencodeClient
+  /** workspaceRoots 配置，用于 /dir list 扫描和 /dir 绑定查找。 */
+  workspaceRoots?: ReadonlyArray<string>
+  /** PR2: larkClient 别名（feishuClient 已经是 Lark.Client 类型，但某些代码引用 larkClient 名字）。 */
+  larkClient?: InstanceType<typeof Lark.Client>
 }
 
 interface AssistantSnapshot {
@@ -315,14 +326,31 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
   // 纯文本空消息没有任何处理价值，直接忽略。
   if (!content.trim() && messageType === "text") return undefined
 
-  const { config, client, feishuClient, log, directory } = deps
+  const { config, client, feishuClient, log, directory: fallbackDirectory, workspaceRoots = [] } = deps
+
+  // 解析 chat 实际工作的目录：chatProjectMap 中的 binding 优先，否则回退到
+  // feishu.json.directory（workspaceRoot 本身）。如果 binding 指向不存在的目录，
+  // 自动清空 binding 并回退，避免后续 session.create 失败。
+  const bound = getChatProject(chatType, chatId)
+  let directory = fallbackDirectory
+  if (bound) {
+    if (existsSync(bound.path)) {
+      directory = bound.path
+    } else {
+      log("warn", "chat binding 指向不存在的目录，自动 unbind", {
+        chatType, chatId, stalePath: bound.path,
+      })
+      clearChatProject(chatType, chatId)
+    }
+  }
+
   const query = directory ? { directory } : undefined
 
   // 同一飞书聊天会稳定映射到同一个逻辑 sessionKey。
   const sessionKey = buildSessionKey(chatType, chatType === "p2p" ? senderId : chatId)
 
   // 显式会话控制命令：/new
-  // 在插件层处理，避免把命令透传给模型后只返回“口头确认”却未真正切换 session。
+  // 在插件层处理，避免把命令透传给模型后只返回"口头确认"却未真正切换 session。
   if (shouldReply && messageType === "text" && content.trim() === "/new") {
     invalidateSession(sessionKey)
     const freshSession = await getOrCreateSession(client, sessionKey, directory)
@@ -355,9 +383,117 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     return undefined
   }
 
+  // /dir 命令：工程切换
+  if (shouldReply && messageType === "text" && content.trim().startsWith("/dir")) {
+    try {
+      const args = content.trim().slice(4).trim() // remove "/dir"
+      const dirDeps: DirCommandDeps = {
+        client, log, workspaceRoots, chatType, chatId, larkClient: feishuClient,
+      }
+      const result = await handleDirCommand(args, dirDeps)
+
+      const ack = await sender.sendInteractiveCard(feishuClient, chatId, result.card, log)
+      if (!ack.ok) {
+        log("error", "发送 /dir 卡片失败", { chatId, error: ack.error ?? "unknown" })
+      }
+
+      // 切换工程或 unbind 时让旧 session 失效
+      if (result.switchTo || result.unbind) {
+        // 换绑前提取旧 session 上下文，注入到新 session
+        const oldId = await getCurrentSessionId(client, sessionKey, fallbackDirectory)
+        if (oldId) {
+          const ctx = await extractSessionContext(client, oldId, fallbackDirectory)
+          if (ctx) {
+            setPendingContext(sessionKey, ctx)
+            log("info", "/dir: 已暂存旧 session 上下文", { sessionKey, oldSessionId: oldId, ctxLen: ctx.length })
+          }
+        }
+        invalidateSession(sessionKey)
+        log("info", "/dir: invalidate session for switch/unbind", {
+          sessionKey, switchTo: result.switchTo?.path, unbind: result.unbind,
+        })
+      }
+    } catch (err) {
+      log("error", "/dir 命令执行失败", { error: String(err) })
+      await sender.sendTextMessage(feishuClient, chatId, "❌ /dir 命令执行失败", log)
+    }
+    return undefined
+  }
+
+  // /unbind 命令：解除工程绑定
+  if (shouldReply && messageType === "text" && content.trim() === "/unbind") {
+    try {
+      const result = handleUnbindCommand({
+        chatType, chatId, fallbackDirectory, log, larkClient: feishuClient,
+      })
+      const ack = await sender.sendInteractiveCard(feishuClient, chatId, result.card, log)
+      if (!ack.ok) {
+        log("error", "发送 /unbind 卡片失败", { chatId, error: ack.error ?? "unknown" })
+      }
+      if (result.unbind) {
+        // 解绑前提取旧 session 上下文，注入到回退目录的新 session
+        const oldId = await getCurrentSessionId(client, sessionKey, fallbackDirectory)
+        if (oldId) {
+          const ctx = await extractSessionContext(client, oldId, fallbackDirectory)
+          if (ctx) {
+            setPendingContext(sessionKey, ctx)
+            log("info", "/unbind: 已暂存旧 session 上下文", { sessionKey, oldSessionId: oldId, ctxLen: ctx.length })
+          }
+        }
+        invalidateSession(sessionKey)
+      }
+    } catch (err) {
+      log("error", "/unbind 命令执行失败", { error: String(err) })
+      await sender.sendTextMessage(feishuClient, chatId, "❌ /unbind 命令执行失败", log)
+    }
+    return undefined
+  }
+
+  // 历史对话命令：/history
+  if (shouldReply && messageType === "text" && content.trim().startsWith("/history")) {
+    try {
+      const args = content.trim().replace("/history", "").trim()
+      const card = await handleHistoryCommand(args, {
+        client, log, chatType, chatId, fallbackDirectory,
+      })
+      const ack = await sender.sendInteractiveCard(feishuClient, chatId, card, log)
+      if (!ack.ok) {
+        log("error", "发送 /history 卡片失败", {
+          chatId,
+          error: ack.error ?? "unknown",
+        })
+      }
+    } catch (err) {
+      log("error", "/history 命令执行失败", { error: String(err) })
+      await sender.sendTextMessage(feishuClient, chatId, "❌ 历史命令执行失败", log)
+    }
+    return undefined
+  }
+
   // 绑定或恢复 OpenCode session，并刷新 session → 飞书聊天映射。
   const session = await getOrCreateSession(client, sessionKey, directory)
   registerSessionChat(session.id, chatId, chatType)
+  // PR2: 记录 session → 工程目录映射，供事件路由使用
+  if (directory) {
+    recordSessionDirectory(session.id, directory)
+  }
+
+  // 换绑上下文注入：如果之前 /dir 或 /unbind 暂存了旧 session 的上下文，
+  // 以 noReply 方式注入到新 session 中，不触发 AI 回复。
+  const pendingContext = consumePendingContext(sessionKey)
+  if (pendingContext) {
+    client.session.promptAsync({
+      path: { id: session.id },
+      query,
+      body: {
+        parts: [{ type: "text", text: pendingContext }],
+        noReply: true,
+      },
+    }).catch((err) => {
+      log("warn", "注入换绑上下文失败", { sessionKey, error: String(err) })
+    })
+    log("info", "已注入换绑上下文到新 session", { sessionKey, sessionId: session.id, ctxLen: pendingContext.length })
+  }
   traceLangfuseUser(session.id, senderId, log)
   // 用户有新消息时，说明插件不该再沿用之前的 idle 催促计数。
   clearNudge(session.id)
@@ -377,8 +513,22 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     parts,
   })
 
-  const baseBody = { parts }
+  const baseBody: { parts: PromptPart[]; model?: { providerID: string; modelID: string } } = { parts }
   const replyTitle = deriveReplyTitleFromParts(parts)
+
+  // 主动用全局配置的默认模型覆盖会话模型，避免 desktop app / 旧 session
+  // 仍然使用过期的内置默认模型（例如已下线的 z-ai/glm4.7）。
+  // 配置读取失败时安全降级：不写 model 字段，保持 OpenCode 自身默认。
+  try {
+    const globalModel = await getGlobalDefaultModel(client, directory)
+    if (globalModel) {
+      baseBody.model = globalModel
+    }
+  } catch (err) {
+    log("warn", "读取全局默认模型失败，回退 OpenCode 默认", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 
   // 静默监听模式：消息只作为上下文送入 OpenCode，不给用户看到任何回复。
   if (!shouldReply) {

@@ -40,7 +40,7 @@ export interface RecoveryResult {
  * 注意这里故意不在失败 provider 内做候选搜索，
  * 只信任用户显式配置的默认模型。
  */
-async function getGlobalDefaultModel(
+export async function getGlobalDefaultModel(
   client: OpencodeClient,
   directory?: string,
 ): Promise<{ providerID: string; modelID: string } | undefined> {

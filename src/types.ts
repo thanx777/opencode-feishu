@@ -40,15 +40,25 @@ export interface FeishuMessageContext {
  * 当模型以工具调用收尾却没有继续输出时，插件可按该配置再发一条 synthetic prompt。
  */
 const NudgeSchema = z.object({
-  /** 是否启用 idle 催促能力。 */
-  enabled: z.boolean().default(false),
-  /** 真正送入 OpenCode 的催促文本。 */
-  // 默认文本来自 OpenCode compaction.ts:340 的 autocontinue prompt
-  message: z.string().min(1).default("Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."),
-  /** 两次催促之间的最小间隔（秒）。 */
-  intervalSeconds: z.number().int().positive().max(300).default(30),
-  /** 同一会话内最多催促多少次。 */
-  maxIterations: z.number().int().positive().max(100).default(3),
+	/** 是否启用 idle 催促能力。 */
+	enabled: z.boolean().default(false),
+	/** 真正送入 OpenCode 的催促文本。 */
+	// 默认文本来自 OpenCode compaction.ts:340 的 autocontinue prompt
+	message: z.string().min(1).default("Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."),
+	/** 两次催促之间的最小间隔（秒）。 */
+	intervalSeconds: z.number().int().positive().max(300).default(30),
+	/** 同一会话内最多催促多少次。 */
+	maxIterations: z.number().int().positive().max(100).default(3),
+})
+
+/**
+ * 模型配置。
+ */
+const ModelConfigSchema = z.object({
+	/** 主模型（默认使用的模型）。格式：providerID/modelID，例如 "deepseek/deepseek-v4-flash-free"。 */
+	primary: z.string().min(1, "primary 模型不能为空"),
+	/** 备用模型（主模型不可用时切换）。格式同上。 */
+	fallback: z.string().optional(),
 })
 
 /**
@@ -82,6 +92,27 @@ export const FeishuConfigSchema = z.object({
   nudge: NudgeSchema.default(() => NudgeSchema.parse({})),
   /** OpenCode 工作目录，可在启动阶段进一步展开。 */
   directory: z.string().optional(),
+  /**
+   * 工作区根目录列表：用于 `/dir list` 扫描和 `/dir <name>` 绑定查找。
+   *
+   * 借鉴自 jazinski/opencode-chat-bridge 的 "Project Switching" 模式——
+   * 在这些根目录的子文件夹里挑一个作为"工程"绑定到当前飞书聊天。
+   *
+   * 缺省时回退到 `[directory]`（一个元素的数组）。
+   */
+  workspaceRoots: z.array(z.string().min(1)).optional(),
+  /**
+   * opencode server 的 HTTP Basic Auth 用户名。
+   * 默认 "opencode"（与 opencode serve 默认一致）。
+   * 仅当设置了 serverPassword 时生效。
+   */
+  serverUsername: z.string().min(1).optional(),
+  /**
+   * opencode server 的 HTTP Basic Auth 密码。
+   * 必须和 start-serve.bat 中 `OPENCODE_SERVER_PASSWORD` 保持一致。
+   * 留空 = 不发送 Auth header（适用于 127.0.0.1 单机访问或未启用 Auth 的 dev 模式）。
+   */
+  serverPassword: z.string().min(1).optional(),
 })
 
 /**

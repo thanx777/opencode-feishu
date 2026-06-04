@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+feishu.local.json
 
 dist
 node_modules
@@ -17,6 +18,8 @@ openmemory.md
 .claude
 _Organized
 /logs/
+/scripts/logs/
+*.log
 docs
 output
 .npm-cache

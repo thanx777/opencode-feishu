@@ -50,6 +50,50 @@ function generateSessionTitle(sessionKey: string): string {
 }
 
 /**
+ * 获取当前逻辑会话对应的远端 session ID，但不创建。
+ *
+ * 先查本地缓存，缓存未命中时按标题前缀从远端 list 中匹配最新一条。
+ * 调用时机：/dir 或 /unbind 换绑前，需要拿到旧 session ID 来提取上下文。
+ *
+ * @returns session ID，如果没有找到返回 undefined
+ */
+export async function getCurrentSessionId(
+  client: OpencodeClient,
+  sessionKey: string,
+  directory?: string,
+): Promise<string | undefined> {
+  // 第一层：本地缓存命中
+  const cached = sessionCache.get(sessionKey)
+  if (cached) return cached.id
+
+  // 第二层：按标题前缀在远端已有 session 中反查
+  const titlePrefix = `${TITLE_PREFIX}-${sessionKey}-`
+  const query = directory ? { directory } : undefined
+  try {
+    const { data: sessions } = await client.session.list({ query })
+    if (Array.isArray(sessions)) {
+      const candidates = sessions.filter(
+        (s) => s.title && s.title.startsWith(titlePrefix),
+      )
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => {
+          const ca = a.time?.created ?? 0
+          const cb = b.time?.created ?? 0
+          return cb - ca
+        })
+        const best = candidates[0]
+        if (best?.id) {
+          return best.id
+        }
+      }
+    }
+  } catch {
+    // list 失败 → 回退返回 undefined，不阻断换绑
+  }
+  return undefined
+}
+
+/**
  * 主动使指定逻辑会话失效。
  *
  * 下次 `getOrCreateSession()` 会跳过远端标题复用并直接创建一条新 session，

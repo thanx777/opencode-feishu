@@ -40,6 +40,17 @@ import type { LogFn, PermissionRequest, QuestionRequest } from "../types.js"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import { emit } from "./action-bus.js"
 import { TtlMap } from "../utils/ttl-map.js"
+import { listAllChatProjects } from "../commands/chat-project-map.js"
+import { resolveSessionDirectory, getSessionDirectory } from "./session-project-cache.js"
+import {
+  getPinnedState,
+  setPinnedState,
+  updatePinnedMessage,
+  type PinnedStatusState,
+  type PinnedState,
+} from "./pinned-status.js"
+import { maybeSendBackgroundNotification } from "./notifications.js"
+import { getChatIdBySession } from "../feishu/session-chat-map.js"
 
 /**
  * 当前正在“流式回复”的飞书消息上下文。
@@ -67,6 +78,8 @@ export interface EventDeps {
   client: import("@opencode-ai/sdk").OpencodeClient
   /** idle 催促配置，从解析后的 feishu.json 透传而来。 */
   nudge: { enabled: boolean; message: string; intervalSeconds: number; maxIterations: number }
+  /** 飞书 SDK client（PR2：用于更新 pinned 状态 + 发后台通知）。 */
+  larkClient?: InstanceType<typeof Lark.Client>
 }
 
 /** sessionId → 当前飞书占位消息上下文。 */
@@ -139,6 +152,10 @@ export function unregisterPending(sessionId: string): void {
  * - `message.part.updated`：流式输出增量
  * - `session.error`：错误缓存
  * - 其他事件：统一丢给 `handleV2Event()`
+ *
+ * PR2 增强：除了原 session 级别的 emit，还会调 `routeEventGlobally` 把事件
+ * 路由到所有绑定了该 session 所属工程的飞书 chat（更新 pinned status +
+ * 发送后台通知）。
  */
 export async function handleEvent(
   event: Event,
@@ -187,6 +204,18 @@ export async function handleEvent(
     default:
       handleV2Event(event, deps)
       break
+  }
+
+  // PR2：全局事件路由 —— 给所有绑定了此 session 所属工程的 chat
+  // 推 pinned status 更新 + 后台通知。
+  // 异步执行，不阻塞主链路；try/catch 防止单条事件影响后续。
+  if (deps.larkClient) {
+    routeEventGlobally(event, deps).catch((err) => {
+      deps.log("error", "routeEventGlobally failed", {
+        error: err instanceof Error ? err.message : String(err),
+        eventType: (event as { type?: string }).type,
+      })
+    })
   }
 }
 
@@ -474,4 +503,141 @@ function matchOrLatchMessageId(payload: PendingReplyPayload, messageId: unknown)
   }
 
   return payload.expectedMessageId === normalized
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * PR2: 全局事件路由
+ * ────────────────────────────────────────────────────────────── */
+
+/** 从事件中提取 sessionID（兼容 v1/v2 事件结构）。 */
+function extractSessionIdFromEvent(event: Event): string | undefined {
+  const t = (event as { type?: string }).type
+  const props = (event as { properties?: Record<string, unknown> }).properties ?? {}
+  switch (t) {
+    case "message.part.updated":
+      return (props.part as { sessionID?: string })?.sessionID
+    case "session.idle":
+    case "session.error":
+    case "permission.asked":
+    case "question.asked":
+      return props.sessionID as string | undefined
+    case "message.updated":
+      return (props.info as { sessionID?: string })?.sessionID
+    default:
+      return undefined
+  }
+}
+
+/** 把事件摘要成"一行文字"用于 pinned status 和通知。 */
+function summarizeEvent(event: Event): { status: PinnedStatusState; snippet: string } {
+  const t = (event as { type?: string }).type
+  switch (t) {
+    case "message.part.updated": {
+      const part = (event as any).properties?.part
+      if (part?.type === "text") {
+        const text = String(part.text ?? "").slice(0, 200)
+        return { status: "running", snippet: text }
+      }
+      if (part?.type === "tool") {
+        return { status: "running", snippet: `tool: ${part.tool}` }
+      }
+      return { status: "running", snippet: "" }
+    }
+    case "session.idle":
+      return { status: "idle", snippet: "session 进入 idle" }
+    case "session.error":
+      return { status: "error", snippet: "session 出现错误" }
+    case "message.updated": {
+      const info = (event as any).properties?.info
+      if (info?.role === "assistant") {
+        return { status: "idle", snippet: `assistant 完成 (model: ${info.providerID}/${info.modelID})` }
+      }
+      return { status: "running", snippet: "" }
+    }
+    case "permission.asked":
+      return { status: "running", snippet: "等待权限审批" }
+    case "question.asked":
+      return { status: "running", snippet: "等待问答确认" }
+    default:
+      return { status: "unknown", snippet: t ?? "unknown" }
+  }
+}
+
+/**
+ * 把事件路由到所有绑定了该 session 所属工程的飞书 chat：
+ * 1. 更新 pinned status（节流）
+ * 2. 对非 active 的 chat 发后台通知（节流）
+ *
+ * 不影响原 session 级 emit 链路。
+ */
+async function routeEventGlobally(event: Event, deps: EventDeps): Promise<void> {
+  const sessionId = extractSessionIdFromEvent(event)
+  if (!sessionId) return
+
+  // 解析 session 所属的工程目录
+  let projectDir = getSessionDirectory(sessionId)
+  if (!projectDir) {
+    projectDir = await resolveSessionDirectory(deps.client, sessionId, deps.log)
+  }
+  if (!projectDir) return
+
+  const { status, snippet } = summarizeEvent(event)
+
+  // 找出所有绑定了这个工程的 chat
+  const targetChats = listAllChatProjects().filter((entry) =>
+    normalizePathForRouting(entry.binding.path) === normalizePathForRouting(projectDir!),
+  )
+  if (targetChats.length === 0) return
+
+  // 当前 session 是否在某个 chat 有 active streaming card？
+  const activeChatId = getChatIdBySession(sessionId)
+
+  for (const { key, binding, chatType, id: chatId } of targetChats) {
+    // 跳过 active chat —— 它的流式卡片已经在更新了
+    const isActiveChat = activeChatId === chatId && getChatIdBySession(sessionId) === chatId
+    if (isActiveChat) continue
+
+    // 1. 更新 pinned status
+    const existing = getPinnedState(key)
+    if (existing && deps.larkClient) {
+      const next: PinnedState = {
+        ...existing,
+        status,
+        lastSnippet: snippet || existing.lastSnippet,
+        lastActivityAt: Date.now(),
+      }
+      // 同步内存（即使是节流跳过也保留最新 snippet）
+      setPinnedState(key, next)
+      // 异步 update（内部节流）
+      const result = await updatePinnedMessage(
+        deps.larkClient,
+        chatId,
+        existing.messageId,
+        binding.name,
+        binding.path,
+        next,
+        deps.log,
+      )
+      if (result.sent) {
+        setPinnedState(key, result.nextState)
+      }
+    }
+
+    // 2. 发送后台通知（仅对"非 active 且非自聊天"）
+    if (!isActiveChat && deps.larkClient) {
+      const summary = snippet || (event as { type?: string }).type || "session 活动"
+      await maybeSendBackgroundNotification(
+        deps.larkClient,
+        chatId,
+        binding.name,
+        sessionId,
+        summary,
+        deps.log,
+      )
+    }
+  }
+}
+
+function normalizePathForRouting(p: string): string {
+  return p.toLowerCase().replace(/\\/g, "/").replace(/\/+$/, "")
 }
