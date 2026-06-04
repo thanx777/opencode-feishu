@@ -15,12 +15,13 @@ REM ============================================================
 
 if "%OPENCODE_WORKSPACE%"=="" (
   echo [ERROR] OPENCODE_WORKSPACE is not set
-  echo Example: set OPENCODE_WORKSPACE=D:\my-project
+  echo Run start-autostart.bat instead, or set the env var manually.
   pause
   exit /b 1
 )
 if "%OPENCODE_SERVER_PASSWORD%"=="" (
   echo [ERROR] OPENCODE_SERVER_PASSWORD is not set
+  echo Run start-autostart.bat instead, or set the env var manually.
   pause
   exit /b 1
 )

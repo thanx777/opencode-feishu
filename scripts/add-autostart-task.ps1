@@ -2,7 +2,7 @@
 # Creates a Windows scheduled task to auto-start opencode serve on user logon.
 #
 # Usage (Run PowerShell as Administrator):
-#   .\add-autostart-task.ps1 -Workspace "D:\Vibecoding\Opencode_Project" -Password "your-password"
+#   .\add-autostart-task.ps1 -Workspace "D:\your\project" -Password "your-password"
 #
 # Optional:
 #   -Username    Basic Auth username (default: opencode)

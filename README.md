@@ -5,10 +5,6 @@
 [OpenCode](https://opencode.ai) 飞书插件 — 通过飞书 WebSocket 长连接将飞书消息接入 OpenCode AI 对话。
 
 > 📖 **中文用户文档**：[FEISHU.md](./FEISHU.md) — 安装/启动/飞书命令/故障排查
->
-> **当前版本**: v1.10.10
-> **代码位置**: `D:\Vibecoding\Opencode_WithPhone\`
-> **工程文件位置**: `D:\Vibecoding\Opencode_Project\`
 
 ## 快速开始
 
@@ -175,6 +171,8 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 }
 ```
 
+## 特性
+
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
 - **多工程绑定** — `/dir` 命令在群聊/单聊绑定不同工程，换绑自动转移上下文
@@ -223,6 +221,27 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 
 群聊/单聊可独立绑定不同工程。换绑时自动提取旧 session 的最后 15 条对话文本，注入到新 session 作为上下文摘要，避免切换工程后丢失讨论记忆。
 
+**路径来源：**
+
+```
+feishu.local.json
+├── workspaceRoots  →  /dir list 扫描这些目录下的子文件夹
+└── directory       →  未绑定时 AI 工作的默认目录
+```
+
+例如：
+
+```json
+{
+  "directory": "D:\\work\\main",
+  "workspaceRoots": ["D:\\work", "E:\\projects"]
+}
+```
+
+- `/dir list` → 列出 `D:\work` 和 `E:\projects` 下的所有子目录
+- 没绑定时 → AI 在 `D:\work\main` 工作
+- `/dir my-app` → 绑定后切到具体子目录
+
 - 绑定存储在内存中，24 小时无活动自动过期
 - 重启 serve 后绑定丢失，重新 `/dir` 即可
 - 多群可绑定同一工程，互不干扰
@@ -230,6 +249,69 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 ### 群聊行为
 
 群聊中 bot 仅在被 **@提及**（从选人菜单选 bot，不是手打 @名字）时回复。未 @ 的消息仍会转发给 OpenCode 作为静默上下文。
+
+## 脚本工具
+
+`scripts/` 目录下提供了几个辅助脚本：
+
+### 启动/停止
+
+| 脚本 | 说明 |
+|------|------|
+| `start-serve.bat` | 通用启动脚本，需设置环境变量 `OPENCODE_WORKSPACE` 和 `OPENCODE_SERVER_PASSWORD` |
+| `stop-serve.bat` | 停止 serve 进程 |
+
+> 本地使用时建议直接用 `add-autostart-task.ps1` 生成带配置的启动脚本（见下方）。
+
+### 开机自启
+
+```powershell
+# 以管理员身份运行 PowerShell
+.\add-autostart-task.ps1 -Workspace "D:\your\project" -Password "your-password"
+```
+
+会生成 `start-autostart.bat`（含你的配置，已 gitignore）并创建 Windows 计划任务，登录时自动启动。
+
+## 常见问题
+
+### Q: 飞书机器人不回复？
+
+1. 单聊：确认 serve 启动后创建了 session（`start-serve.bat` 会自动做）
+2. 群聊：需开通 `im:message.group_at_msg:readonly` 权限，并且**从选人菜单 @ bot**（手打 `@名字` 不起作用）
+3. 桌面端和 CLI serve 不能同时运行——双 WebSocket 会导致行为不确定
+
+### Q: Web UI 的 "Open Folder" 选不了 D 盘？
+
+已知 bug（[GitHub #6490](https://github.com/anomalyco/opencode/issues/6490)）。在路径栏**用正斜线 `/`** 输入，然后按 **Tab**：
+
+```
+D:/your/path
+```
+
+### Q: Web UI 项目列表不显示新路径？
+
+创建一个 session 即可注册：
+
+```bash
+curl -u "opencode:password" -X POST "http://localhost:4096/session?directory=D%3A%2Fyour%2Fpath" -H "Content-Type: application/json" -d "{}"
+```
+
+
+### Q: `ConfigInvalidError: Unrecognized key: workspaceRoots`？
+
+`workspaceRoots` 只能写在 `feishu.local.json`（插件配置），**不能**写在 `opencode.jsonc`（OpenCode 主配置）。详见[配置注意事项](#配置注意事项)。
+
+### Q: serve 模式启动后插件没加载？
+
+`opencode serve` 启动时不创建实例，插件不会自动加载。`start-serve.bat` 已包含自动创建 session 的逻辑。手动启动需执行：
+
+```bash
+curl -u "opencode:password" -X POST "http://localhost:4096/session?directory=<workspace-encoded>" -H "Content-Type: application/json" -d "{}"
+```
+
+### Q: 重启 serve 后 `/dir` 绑定丢失？
+
+绑定存储在内存中，重启即清空。重新 `/dir <name>` 即可。24 小时无活动也会自动过期。
 
 ## 开发
 
