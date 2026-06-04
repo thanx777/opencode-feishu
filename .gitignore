@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 feishu.local.json
+scripts/start-autostart.bat
 
 dist
 node_modules
@@ -19,7 +20,10 @@ openmemory.md
 _Organized
 /logs/
 /scripts/logs/
-*.log
 docs
 output
 .npm-cache
+
+# Stray log files in repo root (debug.log, build.log, typecheck.log, etc.)
+*.log
+

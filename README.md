@@ -4,6 +4,12 @@
 
 [OpenCode](https://opencode.ai) 飞书插件 — 通过飞书 WebSocket 长连接将飞书消息接入 OpenCode AI 对话。
 
+> 📖 **中文用户文档**：[FEISHU.md](./FEISHU.md) — 安装/启动/飞书命令/故障排查
+>
+> **当前版本**: v1.10.10
+> **代码位置**: `D:\Vibecoding\Opencode_WithPhone\`
+> **工程文件位置**: `D:\Vibecoding\Opencode_Project\`
+
 ## 快速开始
 
 ### 1. 配置 OpenCode 加载插件
@@ -55,6 +61,8 @@
 | `im:message.p2p_msg:readonly` | 读取单聊消息 |
 | `im:message.group_at_msg:readonly` | 读取群聊中 @ bot 的消息 |
 | `im:chat:readonly` | 读取群信息 |
+| `cardkit:card` | CardKit 基础权限（消息卡片） |
+| `cardkit:card:write` | CardKit 写入权限（流式卡片，必需） |
 | `contact:user.base:readonly` | 解析用户姓名（可选） |
 
 5. **发布应用**（权限变更需重新发布）
@@ -108,7 +116,64 @@ OPENCODE_SERVER_PASSWORD=your-password opencode serve --port 4096 --hostname 0.0
 | `nudge.maxIterations` | number | 否 | `3` | 最大催促次数 |
 | `nudge.message` | string | 否 | — | 催促 prompt 内容 |
 
-## 特性
+### 配置注意事项
+
+**`workspaceRoots` 只在插件配置中有效**
+
+`workspaceRoots` 是插件自定义字段，**不能**写在 `~/.config/opencode/opencode.jsonc` 中（会导致 `ConfigInvalidError`）。只能放在 `feishu.local.json` 或 `feishu.json` 里。
+
+```json
+// ✅ 正确：feishu.local.json
+{
+  "workspaceRoots": ["D:\\projects", "D:\\work"]
+}
+
+// ❌ 错误：opencode.jsonc
+{
+  "workspaceRoots": [...]   // OpenCode 不认识这个字段
+}
+```
+
+**桌面端 vs CLI serve 不能同时运行**
+
+两者都会连接飞书 WebSocket，同一 bot 出现两个连接会导致消息行为不确定（不回、回一条、回两条）。切换前必须先停掉另一个。
+
+**Basic Auth 必须一致**
+
+`serverUsername` / `serverPassword` 必须与启动 serve 时的环境变量相同：
+
+```bash
+# start-serve.bat 里设的值必须等于 feishu.local.json 里的值
+OPENCODE_SERVER_PASSWORD=xxx opencode serve ...
+```
+
+**群聊需要单独开通权限**
+
+群聊中 bot 默认不回复。需要：
+1. 飞书后台开通 `im:message.group_at_msg:readonly`
+2. 群里输入 `@` 从选人菜单选 bot，**不能手打 @名字**
+
+**环境变量支持**
+
+所有字符串字段都支持 `${ENV_VAR}` 语法，启动时自动展开：
+
+```json
+{
+  "appId": "${FEISHU_APP_ID}",
+  "appSecret": "${FEISHU_APP_SECRET}",
+  "directory": "${OPENCODE_WORKSPACE}"
+}
+```
+
+**Windows 插件路径**
+
+Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路径：
+
+```json
+{
+  "plugin": ["D:/path/to/opencode-feishu"]
+}
+```
 
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
