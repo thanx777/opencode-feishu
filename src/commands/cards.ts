@@ -225,8 +225,22 @@ export function buildDirListCard(
   workspaces: ScannedWorkspace[],
   roots: ReadonlyArray<string>,
   chatId?: string,
+  currentPath?: string,
 ): object {
   const elements: object[] = []
+
+  // 顶部显示当前工作路径
+  if (currentPath) {
+    const displayName = currentPath.split(/[/\\]/).pop() ?? currentPath
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**📍 当前工作路径：**\n\`${currentPath}\``,
+      },
+    })
+    elements.push({ tag: "hr" })
+  }
 
   if (roots.length === 0) {
     elements.push({

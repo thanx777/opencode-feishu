@@ -178,6 +178,8 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
 - **多工程绑定** — `/dir` 命令在群聊/单聊绑定不同工程，换绑自动转移上下文；文件夹浏览器模式支持逐级浏览、返回上级、确定绑定
+- **模式切换** — `/mode` 命令切换 plan（规划）/ build（执行）模式，per-sessionKey 覆盖
+- **模型切换** — `/model` 命令查看可用模型并切换，per-sessionKey 覆盖
 - **Agent 卡片工具** — `feishu_send_card` tool，AI 自主决定何时使用卡片展示结构化内容
 - **运行时 prompt 分层** — `prompt.md` 仅注入飞书渠道事实和工具契约
 - **多媒体消息支持** — 图片、文件、音频、富文本（含内嵌图片）、卡片表格等
@@ -213,6 +215,11 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 | 命令 | 功能 |
 |------|------|
 | `/new` | 重置当前会话，创建新 session |
+| `/mode` | 切换 AI 模式（plan 规划 / build 执行），显示按钮选择 |
+| `/mode plan` | 直接切换到 plan 模式 |
+| `/mode build` | 直接切换到 build 模式 |
+| `/model` | 查看当前模型 + 可用模型列表（按钮选择） |
+| `/model <id>` | 切换到指定模型（id 格式：providerID/modelID） |
 | `/dir` | 查看当前聊天绑定的工程 |
 | `/dir list` | 打开文件夹浏览器，按按钮选择工作区 |
 | `/dir browse <path>` | 浏览指定路径的子目录 |
@@ -263,6 +270,7 @@ feishu.local.json
 | 脚本 | 说明 |
 |------|------|
 | `start-serve.bat` | 通用启动脚本，需设置环境变量 `OPENCODE_WORKSPACE` 和 `OPENCODE_SERVER_PASSWORD` |
+| `start-serve-debug.bat` | 调试模式启动，启用 `FEISHU_DEBUG=1` 并输出日志到 `scripts/logs/debug.log` |
 | `stop-serve.bat` | 停止 serve 进程 |
 
 > 本地使用时建议直接用 `add-autostart-task.ps1` 生成带配置的启动脚本（见下方）。
@@ -327,6 +335,10 @@ curl -u "opencode:password" -X POST "http://localhost:4096/session?directory=<wo
 ### Q: 重启 serve 后 `/dir` 绑定丢失？
 
 绑定存储在内存中，重启即清空。重新 `/dir <name>` 即可。24 小时无活动也会自动过期。
+
+### Q: `/model` 切换模型后 AI 仍说自己是 deepseek？
+
+`opencode` provider 的免费模型（如 `minimax-m3-free`、`deepseek-v4-flash-free`）底层可能共享同一个 API 端点，实际调用的可能是 deepseek 的模型。这是 OpenCode 的 provider 路由行为，不是插件的 bug。`/model` 切换确实生效了（可通过 `FEISHU_DEBUG=1` 日志确认 `providerID` 和 `modelID` 已变更），但 AI 自身无法感知被路由到了哪个底层模型。如需使用不同底层模型，可切换到 `nvidia` 或 `github-copilot` 等其他 provider。
 
 ## 开发
 

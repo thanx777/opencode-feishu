@@ -53,6 +53,8 @@ import { handleDirCommand, type DirCommandDeps } from "../commands/dir.js"
 import { handleUnbindCommand } from "../commands/unbind.js"
 import { getChatProject, clearChatProject } from "../commands/chat-project-map.js"
 import { handleHistoryCommand } from "../commands/history.js"
+import { handleModeCommand, type ModeCommandDeps } from "../commands/mode.js"
+import { handleModelCommand, type ModelCommandDeps } from "../commands/model.js"
 import { recordSessionDirectory } from "./session-project-cache.js"
 import { existsSync } from "node:fs"
 
@@ -293,6 +295,25 @@ async function finalizeReply(params: FinalizeReplyParams): Promise<void> {
   await replyOrUpdate(feishuClient, chatId, fallbackPlaceholderId, buildSimpleFallbackText(view), log)
 }
 
+/** per-sessionKey 的 model/agent 覆盖，由 /model 和 /mode 命令写入 */
+const sessionOverrides = new Map<string, { model?: { providerID: string; modelID: string }; agent?: string }>()
+
+export function setSessionModelOverride(sessionKey: string, model: { providerID: string; modelID: string } | undefined) {
+  const cur = sessionOverrides.get(sessionKey) ?? {}
+  if (model) cur.model = model; else delete cur.model
+  sessionOverrides.set(sessionKey, cur)
+}
+
+export function setSessionAgentOverride(sessionKey: string, agent: string | undefined) {
+  const cur = sessionOverrides.get(sessionKey) ?? {}
+  if (agent) cur.agent = agent; else delete cur.agent
+  sessionOverrides.set(sessionKey, cur)
+}
+
+export function getSessionOverrides(sessionKey: string) {
+  return sessionOverrides.get(sessionKey)
+}
+
 function mergeAbortSignals(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const activeSignals = signals.filter((item): item is AbortSignal => !!item)
   if (activeSignals.length === 0) return undefined
@@ -470,6 +491,51 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     return undefined
   }
 
+  // /mode 命令：切换 plan/build 模式
+  // 命令类消息无论 shouldReply 都拦截，避免透传给模型
+  if (messageType === "text" && content.trim().startsWith("/mode") && !content.trim().startsWith("/model")) {
+    try {
+      const args = content.trim().slice(5).trim() // remove "/mode"
+      const modeDeps: ModeCommandDeps = {
+        log,
+        chatId,
+        sessionKey,
+      }
+      const result = await handleModeCommand(args, modeDeps)
+      const ack = await sender.sendInteractiveCard(feishuClient, chatId, result.card, log)
+      if (!ack.ok) {
+        log("error", "发送 /mode 卡片失败", { chatId, error: ack.error ?? "unknown" })
+      }
+    } catch (err) {
+      log("error", "/mode 命令执行失败", { error: String(err) })
+      await sender.sendTextMessage(feishuClient, chatId, "❌ /mode 命令执行失败", log)
+    }
+    return undefined
+  }
+
+  // /model 命令：查看/切换模型
+  if (messageType === "text" && content.trim().startsWith("/model")) {
+    try {
+      const args = content.trim().slice(6).trim() // remove "/model"
+      const modelDeps: ModelCommandDeps = {
+        client: deps.client,
+        directory,
+        log,
+        chatId,
+        sessionKey,
+      }
+      const result = await handleModelCommand(args, modelDeps)
+      const ack = await sender.sendInteractiveCard(feishuClient, chatId, result.card, log)
+      if (!ack.ok) {
+        log("error", "发送 /model 卡片失败", { chatId, error: ack.error ?? "unknown" })
+      }
+    } catch (err) {
+      log("error", "/model 命令执行失败", { error: String(err) })
+      await sender.sendTextMessage(feishuClient, chatId, "❌ /model 命令执行失败", log)
+    }
+    return undefined
+  }
+
   // 绑定或恢复 OpenCode session，并刷新 session → 飞书聊天映射。
   const session = await getOrCreateSession(client, sessionKey, directory)
   registerSessionChat(session.id, chatId, chatType)
@@ -513,21 +579,34 @@ export async function handleChat(ctx: FeishuMessageContext, deps: ChatDeps, sign
     parts,
   })
 
-  const baseBody: { parts: PromptPart[]; model?: { providerID: string; modelID: string } } = { parts }
+  const baseBody: { parts: PromptPart[]; model?: { providerID: string; modelID: string }; agent?: string } = { parts }
   const replyTitle = deriveReplyTitleFromParts(parts)
 
-  // 主动用全局配置的默认模型覆盖会话模型，避免 desktop app / 旧 session
-  // 仍然使用过期的内置默认模型（例如已下线的 z-ai/glm4.7）。
-  // 配置读取失败时安全降级：不写 model 字段，保持 OpenCode 自身默认。
-  try {
-    const globalModel = await getGlobalDefaultModel(client, directory)
-    if (globalModel) {
-      baseBody.model = globalModel
+  // /model 和 /mode 命令的 per-session 覆盖优先于全局配置
+  const overrides = getSessionOverrides(sessionKey)
+
+  // agent 覆盖（/mode 命令设置）
+  if (overrides?.agent) {
+    baseBody.agent = overrides.agent
+  }
+
+  // model 覆盖优先级：/model 命令 > 全局配置 > OpenCode 默认
+  if (overrides?.model) {
+    baseBody.model = overrides.model
+  } else {
+    // 主动用全局配置的默认模型覆盖会话模型，避免 desktop app / 旧 session
+    // 仍然使用过期的内置默认模型（例如已下线的 z-ai/glm4.7）。
+    // 配置读取失败时安全降级：不写 model 字段，保持 OpenCode 自身默认。
+    try {
+      const globalModel = await getGlobalDefaultModel(client, directory)
+      if (globalModel) {
+        baseBody.model = globalModel
+      }
+    } catch (err) {
+      log("warn", "读取全局默认模型失败，回退 OpenCode 默认", {
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
-  } catch (err) {
-    log("warn", "读取全局默认模型失败，回退 OpenCode 默认", {
-      error: err instanceof Error ? err.message : String(err),
-    })
   }
 
   // 静默监听模式：消息只作为上下文送入 OpenCode，不给用户看到任何回复。

@@ -165,7 +165,7 @@ async function sendWelcomeCard(
     tag: "div",
     text: {
       tag: "lark_md",
-      content: "**其他命令：**\n• `/dir list` - 查看所有工程\n• `/dir` - 查看当前绑定\n• `/unbind` - 解除绑定\n• `/new` - 在当前工程创建新会话\n• `/history` - 查看历史会话",
+      content: "**其他命令：**\n• `/dir list` - 查看所有工程\n• `/dir` - 查看当前绑定\n• `/mode` - 切换 Plan/Build 模式\n• `/model` - 查看/切换 AI 模型\n• `/unbind` - 解除绑定\n• `/new` - 在当前工程创建新会话\n• `/history` - 查看历史会话",
     },
   })
 

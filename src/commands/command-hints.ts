@@ -32,6 +32,8 @@ export const HISTORY_HINTS: CommandHint[] = [
 export const GENERAL_HINTS: CommandHint[] = [
   { cmd: "/new", desc: "在当前工程创建新会话" },
   { cmd: "/dir", desc: "查看/切换工程" },
+  { cmd: "/mode", desc: "切换 Plan/Build 模式" },
+  { cmd: "/model", desc: "查看/切换 AI 模型" },
   { cmd: "/unbind", desc: "解除工程绑定" },
   { cmd: "/history", desc: "查看历史会话" },
 ]

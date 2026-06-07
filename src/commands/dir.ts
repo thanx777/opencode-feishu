@@ -71,7 +71,7 @@ export async function handleDirCommand(
 
   // /dir list -> 列出所有（文件夹浏览器模式）
   if (sub.toLowerCase() === "list") {
-    return showList(workspaceRoots, chatId, log)
+    return showList(workspaceRoots, chatId, chatType, log)
   }
 
   // /dir browse <path> -> 浏览指定路径的子目录
@@ -110,11 +110,12 @@ function showCurrent(
   }
 }
 
-function showList(workspaceRoots: ReadonlyArray<string>, chatId: string, log: LogFn): DirCommandResult {
+function showList(workspaceRoots: ReadonlyArray<string>, chatId: string, chatType: string, log: LogFn): DirCommandResult {
   const workspaces = scanWorkspaces(workspaceRoots)
+  const current = getChatProject(chatType as "p2p" | "group", chatId)
   log("info", "/dir list: 扫描工作区", { count: workspaces.length, roots: workspaceRoots })
   return {
-    card: buildDirListCard(workspaces, workspaceRoots, chatId),
+    card: buildDirListCard(workspaces, workspaceRoots, chatId, current?.path),
   }
 }
 
