@@ -301,6 +301,17 @@ curl -u "opencode:password" -X POST "http://localhost:4096/session?directory=D%3
 
 `workspaceRoots` 只能写在 `feishu.local.json`（插件配置），**不能**写在 `opencode.jsonc`（OpenCode 主配置）。详见[配置注意事项](#配置注意事项)。
 
+### Q: 桌面端启动后"会话获取失败"、模型选不了？
+
+通常是 `opencode.jsonc` 中包含了 OpenCode 不认识的字段（如 `env`、`workspaceRoots` 等），导致配置校验失败（`ConfigInvalidError`），整个应用无法初始化。
+
+排查步骤：
+
+1. 检查 `~/.config/opencode/opencode.jsonc`，确认没有 `env`、`workspaceRoots` 等非 OpenCode schema 定义的字段
+2. OpenCode 配置 schema 不支持顶层 `env` 字段——如需设置 Provider API Key，应使用 `provider.<id>.options.apiKey`
+3. 临时禁用插件排查：将 `"plugin": [...]` 改为 `"plugin": []`，确认是否为插件引起
+4. 查看日志：`~/.local/share/opencode/log/` 下按时间戳命名的日志文件
+
 ### Q: serve 模式启动后插件没加载？
 
 `opencode serve` 启动时不创建实例，插件不会自动加载。`start-serve.bat` 已包含自动创建 session 的逻辑。手动启动需执行：
