@@ -3,7 +3,9 @@
  *
  * 支持的子命令：
  * - `/dir`           显示当前聊天绑定的工程
- * - `/dir list`      列出所有可绑定工程
+ * - `/dir list`      列出所有可绑定工程（文件夹浏览器模式）
+ * - `/dir browse <path>`  浏览指定路径的子目录
+ * - `/dir bind <path>`    按路径直接绑定工程
  * - `/dir <name>`    把此聊天绑定到 <name> 工程
  *
  * 设计要点：
@@ -15,9 +17,10 @@
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import type * as Lark from "@larksuiteoapi/node-sdk"
 import type { LogFn } from "../types.js"
-import { existsSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
+import { join, resolve, dirname, basename, sep } from "node:path"
 import { scanWorkspaces, findWorkspaceByName, type ScannedWorkspace } from "../utils/scan-workspaces.js"
-import { buildDirListCard, buildCurrentDirCard, buildErrorCard } from "./cards.js"
+import { buildDirListCard, buildBrowseCard, buildCurrentDirCard, buildErrorCard } from "./cards.js"
 import { DIR_HINTS, UNBIND_HINTS, GENERAL_HINTS, mergeHints } from "./command-hints.js"
 import { setChatProject, getChatProject, clearChatProject, buildChatKey } from "./chat-project-map.js"
 import {
@@ -66,9 +69,21 @@ export async function handleDirCommand(
     return showCurrent(chatType, chatId, log)
   }
 
-  // /dir list -> 列出所有
+  // /dir list -> 列出所有（文件夹浏览器模式）
   if (sub.toLowerCase() === "list") {
-    return showList(workspaceRoots, log)
+    return showList(workspaceRoots, chatId, log)
+  }
+
+  // /dir browse <path> -> 浏览指定路径的子目录
+  if (sub.toLowerCase() === "browse") {
+    const browsePath = trimmed.slice(sub.length).trim()
+    return showBrowse(browsePath, workspaceRoots, chatId, log)
+  }
+
+  // /dir bind <path> -> 按路径直接绑定
+  if (sub.toLowerCase() === "bind") {
+    const bindPath = trimmed.slice(sub.length).trim()
+    return bindByPath(bindPath, workspaceRoots, chatType, chatId, deps.larkClient, log)
   }
 
   // /dir <name> -> 绑定
@@ -95,11 +110,105 @@ function showCurrent(
   }
 }
 
-function showList(workspaceRoots: ReadonlyArray<string>, log: LogFn): DirCommandResult {
+function showList(workspaceRoots: ReadonlyArray<string>, chatId: string, log: LogFn): DirCommandResult {
   const workspaces = scanWorkspaces(workspaceRoots)
   log("info", "/dir list: 扫描工作区", { count: workspaces.length, roots: workspaceRoots })
   return {
-    card: buildDirListCard(workspaces, workspaceRoots, mergeHints(DIR_HINTS, GENERAL_HINTS)),
+    card: buildDirListCard(workspaces, workspaceRoots, chatId),
+  }
+}
+
+/** 浏览指定路径的子目录 */
+function showBrowse(
+  browsePath: string,
+  workspaceRoots: ReadonlyArray<string>,
+  chatId: string,
+  log: LogFn,
+): DirCommandResult {
+  const resolved = resolve(browsePath)
+  if (!existsSync(resolved)) {
+    return { card: buildErrorCard("路径不存在", `路径 \`${resolved}\` 不存在。`) }
+  }
+  let stat
+  try { stat = statSync(resolved) } catch {
+    return { card: buildErrorCard("无法访问", `无法访问路径 \`${resolved}\`。`) }
+  }
+  if (!stat.isDirectory()) {
+    return { card: buildErrorCard("不是目录", `\`${resolved}\` 不是目录。`) }
+  }
+
+  // 读取子目录
+  const subdirs: string[] = []
+  try {
+    const entries = readdirSync(resolved, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const name = String(entry.name)
+      if (name.startsWith(".")) continue
+      if (["node_modules", "dist", "build", "out", ".git", ".cache", "coverage", "__pycache__", ".venv", "venv"].includes(name)) continue
+      subdirs.push(name)
+    }
+  } catch {
+    return { card: buildErrorCard("无法读取", `无法读取目录 \`${resolved}\`。`) }
+  }
+
+  subdirs.sort((a, b) => a.localeCompare(b))
+
+  // 判断是否在 workspaceRoots 内（用于确定"返回"目标）
+  const normalizedResolved = normalizePath(resolved)
+  const parentRoot = workspaceRoots.find((r) => {
+    const nr = normalizePath(r)
+    return normalizedResolved === nr || normalizedResolved.startsWith(nr + "/")
+  })
+
+  log("info", "/dir browse: 浏览目录", { path: resolved, subdirs: subdirs.length })
+
+  return {
+    card: buildBrowseCard(resolved, subdirs, workspaceRoots, chatId),
+  }
+}
+
+/** 按路径直接绑定工程 */
+function bindByPath(
+  bindPath: string,
+  workspaceRoots: ReadonlyArray<string>,
+  chatType: "p2p" | "group",
+  chatId: string,
+  larkClient: InstanceType<typeof Lark.Client> | undefined,
+  log: LogFn,
+): DirCommandResult {
+  const resolved = resolve(bindPath)
+  if (!existsSync(resolved)) {
+    return { card: buildErrorCard("路径不存在", `路径 \`${resolved}\` 不存在。`) }
+  }
+
+  const name = basename(resolved) || resolved
+
+  const chatKey = buildChatKey(chatType, chatId)
+  const previous = getChatProject(chatType, chatId)
+  const isSameAsBefore = previous && normalizePath(previous.path) === normalizePath(resolved)
+  setChatProject(chatType, chatId, {
+    path: resolved,
+    name,
+    boundAt: Date.now(),
+  })
+
+  if (larkClient) {
+    void handlePinnedTransition(larkClient, chatType, chatId, chatKey, name, resolved, log)
+  }
+
+  log("info", "/dir bind: 按路径绑定成功", {
+    chatType, chatId, path: resolved, name, switched: !isSameAsBefore,
+  })
+
+  return {
+    card: buildCurrentDirCard(
+      { path: resolved, name, boundAt: Date.now() },
+      mergeHints(DIR_HINTS, UNBIND_HINTS, GENERAL_HINTS),
+    ),
+    switchTo: isSameAsBefore
+      ? undefined
+      : { path: resolved, name },
   }
 }
 

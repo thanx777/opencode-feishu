@@ -8,6 +8,7 @@ import type { CommandHint } from "./command-hints.js"
 import { buildCommandHintsSection } from "./command-hints.js"
 import type { ScannedWorkspace } from "../utils/scan-workspaces.js"
 import type { ChatProjectBinding } from "./chat-project-map.js"
+import { dirname, join } from "node:path"
 
 /**
  * 当前工作区信息（用于卡片顶部）
@@ -216,59 +217,201 @@ export function buildErrorCard(title: string, message: string): object {
 }
 
 /**
- * `/dir list` 卡片：列出所有 workspaceRoots 下的可绑定工程。
+ * `/dir list` 卡片：顶层文件夹浏览器。
  *
- * 按 root 分组展示，根工程用 🌳 标识，子目录用 📁。
+ * 显示每个 workspaceRoot 作为文件夹按钮，点击进入浏览子目录。
  */
 export function buildDirListCard(
   workspaces: ScannedWorkspace[],
   roots: ReadonlyArray<string>,
-  commandHints?: CommandHint[],
+  chatId?: string,
 ): object {
-  const byRoot = new Map<string, ScannedWorkspace[]>()
-  for (const w of workspaces) {
-    const list = byRoot.get(w.root) ?? []
-    list.push(w)
-    byRoot.set(w.root, list)
-  }
-
   const elements: object[] = []
 
-  if (workspaces.length === 0) {
+  if (roots.length === 0) {
     elements.push({
       tag: "div",
       text: {
         tag: "lark_md",
-        content: `⚠️ 没有任何可绑定的工程\n\n请确认 \`workspaceRoots\` 配置正确：\n${roots.map((r) => `• \`${r}\``).join("\n") || "（未配置）"}`,
+        content: "⚠️ 没有配置 workspaceRoots，请在飞书插件配置中添加。",
       },
     })
   } else {
-    for (const [root, items] of byRoot) {
-      const listText = items
-        .map((w, i) => {
-          const tag = w.name === "(root)" ? "🌳" : "📁"
-          const gitTag = w.hasGit ? " 🔀" : ""
-          return `${i + 1}. ${tag} \`${w.name}\`${gitTag}\n   \`${w.path}\``
-        })
-        .join("\n\n")
-      elements.push({
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: `**🌳 ${root}**\n${listText}`,
-        },
-      })
-      elements.push({ tag: "hr" })
-    }
-  }
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "**📂 选择工作区根目录：**",
+      },
+    })
 
-  if (commandHints) {
-    elements.push(buildCommandHintsSection(commandHints))
+    // 每个 root 一个按钮，点击进入浏览
+    if (chatId) {
+      for (const root of roots) {
+        const displayName = root.split(/[/\\]/).pop() ?? root
+        elements.push({
+          tag: "column_set",
+          flex_mode: "none",
+          background_style: "default",
+          columns: [{
+            tag: "column",
+            width: "weighted",
+            weight: 1,
+            elements: [{
+              tag: "button",
+              text: { tag: "plain_text", content: `📂 ${displayName}` },
+              type: "primary",
+              value: {
+                action: "send_message",
+                chatId,
+                text: `/dir browse ${root}`,
+              },
+            }],
+          }],
+        })
+      }
+    } else {
+      // 无 chatId 时显示文本列表
+      for (const root of roots) {
+        elements.push({
+          tag: "div",
+          text: { tag: "lark_md", content: `• \`${root}\`` },
+        })
+      }
+    }
   }
 
   return {
     header: {
-      title: { tag: "plain_text", content: "📋 可绑定工程" },
+      title: { tag: "plain_text", content: "📋 选择工作区" },
+      template: "blue",
+    },
+    elements,
+  }
+}
+
+/**
+ * `/dir browse <path>` 卡片：文件夹浏览器。
+ *
+ * - 顶部：返回上级按钮（如果不在 root 层）
+ * - 中间：子目录按钮列表
+ * - 底部：确定按钮（绑定当前目录作为工作区）
+ */
+export function buildBrowseCard(
+  currentPath: string,
+  subdirs: string[],
+  roots: ReadonlyArray<string>,
+  chatId: string,
+): object {
+  const elements: object[] = []
+  const displayName = currentPath.split(/[/\\]/).pop() ?? currentPath
+
+  // 当前路径
+  elements.push({
+    tag: "div",
+    text: {
+      tag: "lark_md",
+      content: `**📁 ${displayName}**\n\`${currentPath}\``,
+    },
+  })
+
+  elements.push({ tag: "hr" })
+
+  // 返回按钮：如果当前路径不是 root 本身，返回上级
+  const normalizedCurrent = currentPath.toLowerCase().replace(/\\/g, "/")
+  const isRoot = roots.some((r) => r.toLowerCase().replace(/\\/g, "/") === normalizedCurrent)
+
+  if (!isRoot) {
+    const parentPath = dirname(currentPath)
+    // 检查上级是否还在某个 root 下
+    const normalizedParent = parentPath.toLowerCase().replace(/\\/g, "/")
+    const parentInRoots = roots.some((r) => {
+      const nr = r.toLowerCase().replace(/\\/g, "/")
+      return normalizedParent === nr || normalizedParent.startsWith(nr + "/")
+    })
+    if (parentInRoots) {
+      elements.push({
+        tag: "column_set",
+        flex_mode: "none",
+        background_style: "default",
+        columns: [{
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [{
+            tag: "button",
+            text: { tag: "plain_text", content: "⬆️ 返回上级" },
+            type: "default",
+            value: {
+              action: "send_message",
+              chatId,
+              text: `/dir browse ${parentPath}`,
+            },
+          }],
+        }],
+      })
+    }
+  }
+
+  // 子目录按钮
+  if (subdirs.length > 0) {
+    for (const dir of subdirs) {
+      const fullPath = join(currentPath, dir)
+      elements.push({
+        tag: "column_set",
+        flex_mode: "none",
+        background_style: "default",
+        columns: [{
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [{
+            tag: "button",
+            text: { tag: "plain_text", content: `📁 ${dir}` },
+            type: "default",
+            value: {
+              action: "send_message",
+              chatId,
+              text: `/dir browse ${fullPath}`,
+            },
+          }],
+        }],
+      })
+    }
+  } else {
+    elements.push({
+      tag: "div",
+      text: { tag: "lark_md", content: "_（此目录下没有子目录）_" },
+    })
+  }
+
+  elements.push({ tag: "hr" })
+
+  // 确定按钮：绑定当前目录
+  elements.push({
+    tag: "column_set",
+    flex_mode: "none",
+    background_style: "default",
+    columns: [{
+      tag: "column",
+      width: "weighted",
+      weight: 1,
+      elements: [{
+        tag: "button",
+        text: { tag: "plain_text", content: `✅ 确定 - 绑定 ${displayName}` },
+        type: "primary",
+        value: {
+          action: "send_message",
+          chatId,
+          text: `/dir bind ${currentPath}`,
+        },
+      }],
+    }],
+  })
+
+  return {
+    header: {
+      title: { tag: "plain_text", content: "📂 浏览目录" },
       template: "blue",
     },
     elements,

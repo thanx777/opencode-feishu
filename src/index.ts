@@ -94,6 +94,9 @@ function resolveWorkspaceRoots(resolvedConfig: ResolvedConfig): string[] {
 
 /**
  * 发送欢迎卡片到刚加入的群聊。
+ *
+ * 扫描 workspaceRoots 下的工程列表，直接展示按钮让用户一键选择，
+ * 无需输入命令。按钮点击后合成 `/dir <name>` 消息走完整链路。
  */
 async function sendWelcomeCard(
   larkClient: InstanceType<typeof Lark.Client>,
@@ -101,31 +104,77 @@ async function sendWelcomeCard(
   workspaceRoots: ReadonlyArray<string>,
   log: LogFn,
 ): Promise<void> {
-  const rootList = workspaceRoots.length > 0
-    ? workspaceRoots.map((r) => `• \`${r}\``).join("\n")
-    : "（未配置）"
+  const elements: object[] = [
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "你好！我是 opencode 飞书机器人。",
+      },
+    },
+  ]
+
+  if (workspaceRoots.length > 0) {
+    elements.push({ tag: "hr" })
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "**📂 选择工作区根目录：**",
+      },
+    })
+    for (const root of workspaceRoots) {
+      const displayName = root.split(/[/\\]/).pop() ?? root
+      elements.push({
+        tag: "column_set",
+        flex_mode: "none",
+        background_style: "default",
+        columns: [{
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [{
+            tag: "button",
+            text: { tag: "plain_text", content: `📂 ${displayName}` },
+            type: "primary",
+            value: {
+              action: "send_message",
+              chatId,
+              text: `/dir browse ${root}`,
+            },
+          }],
+        }],
+      })
+    }
+  } else {
+    const rootList = workspaceRoots.length > 0
+      ? workspaceRoots.map((r) => `• \`${r}\``).join("\n")
+      : "（未配置）"
+    elements.push({ tag: "hr" })
+    elements.push({
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**可用工程根目录：**\n${rootList}`,
+      },
+    })
+  }
+
+  elements.push({ tag: "hr" })
+  elements.push({
+    tag: "div",
+    text: {
+      tag: "lark_md",
+      content: "**其他命令：**\n• `/dir list` - 查看所有工程\n• `/dir` - 查看当前绑定\n• `/unbind` - 解除绑定\n• `/new` - 在当前工程创建新会话\n• `/history` - 查看历史会话",
+    },
+  })
+
   const card = {
     header: {
       title: { tag: "plain_text", content: "👋 opencode 飞书机器人" },
       template: "blue",
     },
-    elements: [
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: `你好！我是 opencode 飞书机器人。\n\n**可用工程根目录：**\n${rootList}`,
-        },
-      },
-      { tag: "hr" },
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: "**快速开始：**\n1. 发送 `/dir list` 查看所有可绑定工程\n2. 发送 `/dir <name>` 把此群绑定到 <name> 工程\n3. 绑定后开始对话即可\n\n**其他命令：**\n• `/dir` - 查看当前绑定\n• `/unbind` - 解除绑定\n• `/new` - 在当前工程创建新会话\n• `/history` - 查看历史会话",
-        },
-      },
-    ],
+    elements,
   }
   const res = await larkClient.im.message.create({
     data: {

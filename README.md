@@ -47,8 +47,10 @@
 
 1. **添加机器人能力**
 2. **事件订阅** — 添加 `im.message.receive_v1` 和 `im.chat.member.bot.added_v1`
-3. **订阅方式** — 选择「使用长连接接收事件/回调」（不是 Webhook）
-4. **权限管理** — 开通以下权限：
+3. **回调配置** — 添加 `card.action.trigger`（卡片按钮交互回调，必需）
+4. **订阅方式** — 事件和回调均选择「使用长连接接收事件/回调」（不是 Webhook）
+5. **权限管理** — 开通以下权限：
+6. **发布应用**（权限和回调变更需重新发布）
 
 | 权限 | 用途 |
 |------|------|
@@ -175,7 +177,7 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 
 - **CardKit 2.0 流式卡片** — AI 回复实时显示文本（markdown 渲染）和工具调用进度
 - **交互式卡片** — 权限审批和问答通过按钮完成（card.action.trigger 回调）
-- **多工程绑定** — `/dir` 命令在群聊/单聊绑定不同工程，换绑自动转移上下文
+- **多工程绑定** — `/dir` 命令在群聊/单聊绑定不同工程，换绑自动转移上下文；文件夹浏览器模式支持逐级浏览、返回上级、确定绑定
 - **Agent 卡片工具** — `feishu_send_card` tool，AI 自主决定何时使用卡片展示结构化内容
 - **运行时 prompt 分层** — `prompt.md` 仅注入飞书渠道事实和工具契约
 - **多媒体消息支持** — 图片、文件、音频、富文本（含内嵌图片）、卡片表格等
@@ -212,7 +214,9 @@ Windows 上 Bun 安装有 EPERM 问题，`opencode.jsonc` 中建议用绝对路�
 |------|------|
 | `/new` | 重置当前会话，创建新 session |
 | `/dir` | 查看当前聊天绑定的工程 |
-| `/dir list` | 列出所有可绑定工程（`workspaceRoots` 下的子目录） |
+| `/dir list` | 打开文件夹浏览器，按按钮选择工作区 |
+| `/dir browse <path>` | 浏览指定路径的子目录 |
+| `/dir bind <path>` | 按路径直接绑定工程 |
 | `/dir <name>` | 将此聊天绑定到 `<name>` 工程 |
 | `/unbind` | 解除工程绑定，回退到默认目录 |
 | `/history` | 查看当前会话的历史记录 |
@@ -238,9 +242,9 @@ feishu.local.json
 }
 ```
 
-- `/dir list` → 列出 `D:\work` 和 `E:\projects` 下的所有子目录
+- `/dir list` → 打开文件夹浏览器，显示 `workspaceRoots` 中的根目录按钮；点击进入浏览子目录，底部"确定"按钮绑定当前目录
 - 没绑定时 → AI 在 `D:\work\main` 工作
-- `/dir my-app` → 绑定后切到具体子目录
+- `/dir my-app` → 绑定后切到具体子目录（也可在欢迎卡片或 `/dir list` 卡片中点击按钮选择）
 
 - 绑定存储在内存中，24 小时无活动自动过期
 - 重启 serve 后绑定丢失，重新 `/dir` 即可
@@ -338,6 +342,20 @@ npm publish --dry-run # 预览将要发布的内容
 
 ## 调试
 
+### 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `FEISHU_DEBUG` | 设为 `1` 时启用结构化 JSON 日志输出到 stderr |
+| `logLevel`（配置项） | 控制 Lark SDK 内部日志级别：`fatal`/`error`/`warn`/`info`/`debug`/`trace` |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` | 代理设置，WebSocket 连接和 API 请求均走代理 |
+| `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | Langfuse 追踪（可选，两者都设置时启用） |
+| `LANGFUSE_BASEURL` | Langfuse 自部署地址（默认 `https://cloud.langfuse.com`） |
+
+### 调试命令
+
+**Linux / macOS：**
+
 ```bash
 # 启用调试日志（结构化 JSON 输出到 stderr）
 FEISHU_DEBUG=1 opencode
@@ -348,6 +366,21 @@ FEISHU_DEBUG=1 opencode 2>&1 | grep '"level":"error"'
 # 重定向到文件
 FEISHU_DEBUG=1 opencode 2>feishu-debug.log
 ```
+
+**Windows PowerShell：**
+
+```powershell
+# 启用调试日志
+$env:FEISHU_DEBUG="1"; opencode
+
+# 过滤错误日志
+$env:FEISHU_DEBUG="1"; opencode 2>&1 | Select-String '"level":"error"'
+
+# 重定向到文件
+$env:FEISHU_DEBUG="1"; opencode 2>feishu-debug.log
+```
+
+> **说明：** `FEISHU_DEBUG=1` 仅在 stderr 输出结构化 JSON，不影响 stdout 管道。日志级别可通过 `feishu.json` 中的 `logLevel` 字段单独控制。
 
 ## 许可证
 
