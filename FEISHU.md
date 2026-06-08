@@ -3,16 +3,16 @@
 > 📱 通过飞书 bot 在手机上控制电脑上的 OpenCode 编程助手
 >
 > 插件：`opencode-feishu` v1.10.10
-> 代码位置：`D:\Vibecoding\Opencode_WithPhone\`
-> 工程文件位置：`D:\Vibecoding\Opencode_Project\`
+> 代码位置：`<插件目录>/`（即本项目根目录）
+> 工程文件位置：`<工程目录>/`（由 `workspaceRoots` 配置）
 
 ---
 
 ## 📁 目录结构
 
 ```
-D:\Vibecoding\
-├── Opencode_WithPhone\              ← 插件代码 + 基础设施 (代码, 不放工程文件)
+<根目录>\
+├── opencode-feishu\                  ← 插件代码 + 基础设施 (代码, 不放工程文件)
 │   ├── src\                          ← 插件源码
 │   ├── dist\index.js                 ← 编译产物 (start-serve 时自动加载)
 │   ├── package.json
@@ -29,7 +29,7 @@ D:\Vibecoding\
 │   ├── README.md                     ← 英文 npm 文档
 │   └── feishu.local.json             ← 本地配置覆盖 (含明文 secret, 已 gitignore)
 │
-└── Opencode_Project\                 ← 你的工程文件 (workspaceRoots 根目录)
+└── <工程目录>\                        ← 你的工程文件 (workspaceRoots 根目录)
     ├── backend\  frontend\  docs\    ← 示例子工程 (占位, 可删)
     ├── .gitignore
     └── README.md
@@ -44,7 +44,7 @@ D:\Vibecoding\
 - 桌面端和 CLI serve **同时运行** → 飞书 WebSocket 抢同一 bot → 飞书行为不确定（不回、回 1 条、回 2 条）
 - 关闭方法：
   - 正常方式：桌面窗口点 X
-  - 强制方式：跑 `D:\Vibecoding\Opencode_WithPhone\scripts\kill-desktop.bat`
+  - 强制方式：跑 `scripts\kill-desktop.bat`
 
 ### 2. 不需要手机连 PC 的 4096 端口
 - 飞书 bot 走 PC → 飞书云 → 手机的链路，**手机不直接连 PC**
@@ -125,14 +125,14 @@ D:\Vibecoding\
 ### 步骤 1：启动 opencode serve
 
 ```cmd
-D:\Vibecoding\Opencode_WithPhone\scripts\start-serve.bat
+scripts\start-serve.bat
 ```
 
 成功输出：
 ```
 [INFO] Started opencode.exe PID=xxx, waiting for port 4096...
 [OK] opencode serve started PID=xxx port=4096
-[OK] Log: D:\Vibecoding\Opencode_WithPhone\scripts\logs\serve.log
+[OK] Log: scripts\logs\serve.log
 [OK] Auth: Basic opencode/<password in bat>
 Press Enter to close:
 ```
@@ -147,7 +147,7 @@ ipconfig
 # 找 IPv4 地址, 例如 192.168.1.100
 ```
 
-手机浏览器开 `http://192.168.1.100:4096/global/health`，输 `opencode` / `12180103xz`，应见 `{"healthy":true,"version":"1.15.1"}`。
+手机浏览器开 `http://<电脑IP>:4096/global/health`，输入 `opencode` / `<你的密码>`，应见 `{"healthy":true,"version":"x.x.x"}`。
 
 > 校园网有 AP isolation 时这步会失败 — 但飞书 bot 仍能用。
 
@@ -174,10 +174,10 @@ ipconfig
 ```
 📂 可用工程 (4 个)
 ─────────────────
-1. backend      D:\Vibecoding\Opencode_Project\backend
-2. docs         D:\Vibecoding\Opencode_Project\docs
-3. frontend     D:\Vibecoding\Opencode_Project\frontend
-4. (root)       D:\Vibecoding\Opencode_Project
+1. backend      <工程目录>\backend
+2. docs         <工程目录>\docs
+3. frontend     <工程目录>\frontend
+4. (root)       <工程目录>
 ```
 
 ### `/dir <名字>`
@@ -192,12 +192,12 @@ ipconfig
 - 绿色卡片：
   ```
   ✅ 已绑定 backend
-  工程: D:\Vibecoding\Opencode_Project\backend
+  工程: <工程目录>\backend
   ```
 - pinned 状态消息（聊天里多出的一条普通文本消息，bot 持续编辑它）：
   ```
   📌 backend 实时状态
-  工程: D:\Vibecoding\Opencode_Project\backend
+  工程: <工程目录>\backend
   状态: ⏸ 等待中
   最后活动: 16:30:15
   ```
@@ -304,7 +304,7 @@ tool: bash 返回了 hello.py
 
 **快速诊断 opencode 进程在和谁通信**：
 ```powershell
-D:\Vibecoding\Opencode_WithPhone\scripts\check-conn.ps1
+scripts\check-conn.ps1
 ```
 应看到至少一个 443 连接（飞书云 / AI provider）。
 
@@ -335,16 +335,16 @@ D:\Vibecoding\Opencode_WithPhone\scripts\check-conn.ps1
 ## 📂 关键配置位置
 
 ```
-C:\Users\thanx\.config\opencode\
+~\.config\opencode\
   opencode.jsonc          ← OpenCode 全局: plugin/model/server
   plugins\feishu.json     ← 飞书插件: appId/appSecret/workspaceRoots/serverPassword
 
-D:\Vibecoding\Opencode_WithPhone\
+<插件目录>\
   feishu.local.example.json    ← 配置模板 (commit 进 git)
   feishu.local.json            ← 本地覆盖 (明文 secret, gitignore)
   scripts\start-serve.bat      ← 启动 (SERVER_PASSWORD 在第 16 行)
 
-D:\Vibecoding\Opencode_Project\
+<工程目录>\
   backend\ frontend\ docs\    ← 你的工程子文件夹
 ```
 
@@ -358,7 +358,7 @@ D:\Vibecoding\Opencode_Project\
 ## 🛑 收工流程
 
 ```cmd
-D:\Vibecoding\Opencode_WithPhone\scripts\stop-serve.bat
+scripts\stop-serve.bat
 [OK] Killed opencode.exe on port 4096 PID=xxx
 ```
 
@@ -372,7 +372,7 @@ D:\Vibecoding\Opencode_WithPhone\scripts\stop-serve.bat
 - ✅ `npm run build` 成功 (~220 KB)
 - ✅ PR1 测试 (12 个): scan + dir command + chat-project-map
 - ✅ PR2 测试 (6 个): pinned + notification + 路由
-- ✅ `opencode serve` 启动 + Basic Auth (`opencode:12180103xz` → /global/health 返回 200)
+- ✅ `opencode serve` 启动 + Basic Auth (`opencode/<your-password>` → /global/health 返回 200)
 - ✅ `start-serve.bat` / `stop-serve.bat` / `kill-desktop.bat` 路径正确
 - ⚠️ 飞书 bot 端到端未自测 (需要你在飞书里实际发消息)
 
@@ -380,7 +380,7 @@ D:\Vibecoding\Opencode_WithPhone\scripts\stop-serve.bat
 
 ## 📞 找帮助
 
-- 日志：`D:\Vibecoding\Opencode_WithPhone\scripts\logs\serve.log`
-- 插件源码：`D:\Vibecoding\Opencode_WithPhone\src\`
-- 测试脚本：`D:\Vibecoding\Opencode_WithPhone\scripts\test-*.ts` (用 `npx tsx scripts/test-*.ts` 跑)
+- 日志：`scripts\logs\serve.log`
+- 插件源码：`src\`
+- 测试脚本：`scripts\test-*.ts` (用 `npx tsx scripts/test-*.ts` 跑)
 - 出问题贴日志问 AI
