@@ -211,8 +211,19 @@ const feishuRuntimePrompt = loadFeishuRuntimePrompt()
  *
  * OpenCode 在加载插件时会调用这个工厂函数，
  * 它完成初始化后返回本插件注册的 hooks 集合。
+ *
+ * 单例守卫：同一进程内只初始化一次。
+ * OpenCode 为每个工作区目录创建新实例时会重复调用工厂函数，
+ * 重复初始化 Lark SDK 会导致 token 获取竞态和后台重试风暴。
  */
+let pluginInitialized = false
+let cachedHooks: Hooks | null = null
+
 export const FeishuPlugin: Plugin = async (ctx) => {
+  if (pluginInitialized && cachedHooks) {
+    return cachedHooks
+  }
+
   const { client } = ctx
   // `gateway` 用于在各个 hook 闭包里判断网关是否已经成功初始化。
   let gateway: FeishuGatewayResult | null = null
@@ -448,6 +459,8 @@ export const FeishuPlugin: Plugin = async (ctx) => {
       })
     },
   }
+  pluginInitialized = true
+  cachedHooks = hooks
   return hooks
 }
 
