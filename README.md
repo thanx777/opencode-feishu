@@ -353,6 +353,78 @@ opencode server GET http://127.0.0.1:5484/agent?directory=... → 503 Service Un
 
 `opencode` provider 的免费模型（如 `minimax-m3-free`、`deepseek-v4-flash-free`）底层可能共享同一个 API 端点，实际调用的可能是 deepseek 的模型。这是 OpenCode 的 provider 路由行为，不是插件的 bug。`/model` 切换确实生效了（可通过 `FEISHU_DEBUG=1` 日志确认 `providerID` 和 `modelID` 已变更），但 AI 自身无法感知被路由到了哪个底层模型。如需使用不同底层模型，可切换到 `nvidia` 或 `github-copilot` 等其他 provider。
 
+### Q: Web UI 某个工作区发消息后一直"思考"无回复，有错误提示音？
+
+**症状**：Web UI 中部分工作区能正常对话，某个工作区发消息后播放错误提示音，一直"思考"无回复。桌面端正常。
+
+**可能原因 1：SQLite 数据库损坏**
+
+OpenCode 的 `session_message` 表 `seq` 字段 NOT NULL 约束失败（版本升级后数据库 schema 不兼容），导致 `prompt_async failed`。
+
+排查：用 debug 模式启动（`start-serve-debug.bat`），在 Web UI 发消息后查看 `scripts/logs/debug.log`，如果出现：
+
+```
+ERROR service=default cause={"_id":"Cause","failures":[{"_tag":"Die","defect":{"code":"SQLITE_CONSTRAINT_NOTNULL"}}]} prompt_async failed
+SQLiteError: NOT NULL constraint failed: session_message.seq
+```
+
+说明是数据库损坏。
+
+修复（会丢失所有对话记录）：
+
+```powershell
+# 1. 停止 serve
+.\scripts\stop-serve.bat
+
+# 2. 删除数据库（OpenCode 下次启动会自动重建）
+Remove-Item "$env:USERPROFILE\.local\share\opencode\opencode.db" -Force
+Remove-Item "$env:USERPROFILE\.local\share\opencode\opencode.db-wal" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.local\share\opencode\opencode.db-shm" -Force -ErrorAction SilentlyContinue
+
+# 3. 重启 serve
+.\scripts\start-serve.bat
+```
+
+**可能原因 2：旧 session 绑定了已下线的模型**
+
+Web UI 自动恢复的旧 session 可能绑定了已下线的模型（如 `minimax-m3-free`、`mimo-v2.5-free`），即使项目配置已更新，旧 session 不会自动切换。
+
+修复：在 Web UI 中新建 session（点 "New Session"），新 session 会使用项目配置中的模型。
+
+**可能原因 3：项目缺少 opencode 配置**
+
+没有项目级 `opencode.jsonc` 的工作区会回退到全局默认模型，如果全局默认模型不可用也会失败。
+
+修复：在项目根目录创建 `opencode.jsonc`：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/deepseek-v4-flash-free"
+}
+```
+
+### Q: Web UI 创建工作区失败，报 "Permission denied" / "cannot lock ref"？
+
+```
+fatal: cannot lock ref 'refs/heads/opencode/clever-lagoon':
+Unable to create '.../.git/refs/heads/opencode/clever-lagoon.lock': Permission denied
+```
+
+**原因**：`.git/refs/heads/opencode` 目录有 Deny Write 的 ACL 规则（可能是之前 CodexSandbox 安全策略留下的），导致 OpenCode 无法创建 worktree 分支。
+
+修复：重置该目录的 ACL 权限：
+
+```powershell
+icacls "D:\your\project\.git\refs\heads\opencode" /reset /T /C
+```
+
+如果整个 `.git/refs/heads` 都有问题，可以一并重置：
+
+```powershell
+icacls "D:\your\project\.git\refs\heads" /reset /T /C
+```
+
 ## 开发
 
 ```bash
