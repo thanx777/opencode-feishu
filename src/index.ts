@@ -216,6 +216,7 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const { client } = ctx
   // `gateway` 用于在各个 hook 闭包里判断网关是否已经成功初始化。
   let gateway: FeishuGatewayResult | null = null
+  let resolvedConfig: ResolvedConfig | undefined
 
   // 60s 缓存 config.get() 结果（model 只在用户手动切换模型时才变化，缓存基本等价于实时）
   const configCache = new TtlMap<{ model?: string }>(60_000)
@@ -245,129 +246,131 @@ export const FeishuPlugin: Plugin = async (ctx) => {
   const localConfigPath = join(pluginDir, "feishu.local.json")
   const globalConfigPath = join(homedir(), ".config", "opencode", "plugins", "feishu.json")
   const configPath = existsSync(localConfigPath) ? localConfigPath : globalConfigPath
-  let resolvedConfig: ResolvedConfig
+
+  // Declare variables that are needed for hooks
+  let larkClient: InstanceType<typeof Lark.Client> | undefined
+  let interactiveDeps: InteractiveDeps | undefined
+
   try {
     // 启动期一次性完成配置读取、环境变量展开和 schema 校验。
     resolvedConfig = loadAndValidateConfig(configPath, ctx.directory ?? "")
     log("info", `配置加载自: ${configPath}`)
-  } catch (e) {
-    if (e instanceof z.ZodError) {
-      const details = e.issues.map(i => `  - ${i.path.join(".")}: ${i.message}`).join("\n")
-      throw new Error(`${LOG_PREFIX} 配置验证失败:\n${details}`)
-    }
-    if (e instanceof SyntaxError) {
-      throw new Error(`飞书配置文件格式错误：${configPath} 必须是合法的 JSON (${e.message})`)
-    }
-    throw e
-  }
 
-  // 初始化去重缓存
-  initDedup(resolvedConfig.dedupTtl)
+    // 初始化去重缓存
+    initDedup(resolvedConfig.dedupTtl)
 
-  // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
-  const larkClient = new Lark.Client({
-    appId: resolvedConfig.appId,
-    appSecret: resolvedConfig.appSecret,
-    domain: Lark.Domain.Feishu,
-    appType: Lark.AppType.SelfBuild,
-  })
-  const cardkit = new CardKitClient(larkClient, log)
+    // 创建 Lark Client（SDK 内置 token 管理 + HTTP 客户端）
+    larkClient = new Lark.Client({
+      appId: resolvedConfig.appId,
+      appSecret: resolvedConfig.appSecret,
+      domain: Lark.Domain.Feishu,
+      appType: Lark.AppType.SelfBuild,
+    })
+    const cardkit = new CardKitClient(larkClient, log)
 
-  // 获取 bot open_id（用于群聊 @提及检测）
-  const botOpenId = await fetchBotOpenId(larkClient, log)
+    // 获取 bot open_id（用于群聊 @提及检测）
+    const botOpenId = await fetchBotOpenId(larkClient, log)
 
-  // opencode server Basic Auth: 如果用户配置了 serverPassword, 给所有客户端加 Authorization header
-  const serverAuthHeader = buildOpencodeServerAuthHeader(resolvedConfig, log)
+    // opencode server Basic Auth: 如果用户配置了 serverPassword, 给所有客户端加 Authorization header
+    const serverAuthHeader = buildOpencodeServerAuthHeader(resolvedConfig, log)
 
-  // v2 client 主要用于权限审批/问答交互回调。
-  const v2Client = createOpencodeClient({
-    directory: resolvedConfig.directory || undefined,
-    headers: serverAuthHeader ? { Authorization: serverAuthHeader } : {},
-  })
-  const interactiveDeps: InteractiveDeps = { feishuClient: larkClient, log, v2Client }
+    // v2 client 主要用于权限审批/问答交互回调。
+    const v2Client = createOpencodeClient({
+      directory: resolvedConfig.directory || undefined,
+      headers: serverAuthHeader ? { Authorization: serverAuthHeader } : {},
+    })
+    interactiveDeps = { feishuClient: larkClient, log, v2Client }
 
-  // ctx.client (in-process 客户端) 也需要 Auth —— 用 interceptor 注入
-  // OpencodeClient 类未公开 interceptors 字段, 但底层 Client 类型有
-  if (serverAuthHeader) {
-    const rawClient = client as unknown as {
-      interceptors?: {
-        request?: { use: (fn: (req: Request) => Promise<Request> | Request) => unknown }
+    // ctx.client (in-process 客户端) 也需要 Auth —— 用 interceptor 注入
+    // OpencodeClient 类未公开 interceptors 字段, 但底层 Client 类型有
+    if (serverAuthHeader) {
+      const rawClient = client as unknown as {
+        interceptors?: {
+          request?: { use: (fn: (req: Request) => Promise<Request> | Request) => unknown }
+        }
+      }
+      if (rawClient.interceptors?.request?.use) {
+        rawClient.interceptors.request.use(async (request) => {
+          request.headers.set("Authorization", serverAuthHeader)
+          return request
+        })
+        log("info", "已为 ctx.client 注入 opencode server Auth header")
+      } else {
+        log("warn", "ctx.client 不支持 interceptors, 跳过 Auth 注入 (可能不需要)")
       }
     }
-    if (rawClient.interceptors?.request?.use) {
-      rawClient.interceptors.request.use(async (request) => {
-        request.headers.set("Authorization", serverAuthHeader)
-        return request
-      })
-      log("info", "已为 ctx.client 注入 opencode server Auth header")
-    } else {
-      log("warn", "ctx.client 不支持 interceptors, 跳过 Auth 注入 (可能不需要)")
-    }
+
+    // 启动飞书 WebSocket 网关（复用 larkClient）
+    // workspaceRoots 从 feishu.json 读取，缺失时回退到 [resolvedConfig.directory]
+    const workspaceRoots = resolveWorkspaceRoots(resolvedConfig)
+    log("info", "workspaceRoots 已加载", { count: workspaceRoots.length, roots: workspaceRoots })
+
+    gateway = startFeishuGateway({
+      config: resolvedConfig,
+      larkClient,
+      botOpenId,
+      onMessage: async (msgCtx) => {
+        // 网关未完成初始化或消息为空时，不进入主处理链路。
+        if (!msgCtx.content.trim() || !gateway || !resolvedConfig || !larkClient || !interactiveDeps) return
+        await enqueueMessage(msgCtx, {
+          config: resolvedConfig,
+          client,
+          feishuClient: larkClient,
+          log,
+          directory: resolvedConfig.directory,
+          cardkit,
+          interactiveDeps,
+          v2Client,
+          workspaceRoots,
+          larkClient,
+        })
+      },
+      onBotAdded: (chatId) => {
+        if (!gateway || !resolvedConfig || !larkClient) return
+        // Bot 刚入群时：异步补录历史消息 + 主动发送欢迎卡片
+        ingestGroupHistory(larkClient, client, chatId, {
+          maxMessages: resolvedConfig.maxHistoryMessages,
+          log,
+          directory: resolvedConfig.directory,
+        }).catch((err) => {
+          log("error", "群聊历史摄入失败", {
+            chatId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+        // 发送欢迎消息：引导用户 /dir 绑定工程
+        sendWelcomeCard(larkClient, chatId, workspaceRoots, log).catch((err) => {
+          log("error", "发送欢迎消息失败", {
+            chatId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+      },
+      onCardAction: async (action) => {
+        if (!gateway || !interactiveDeps) return
+        // 交互按钮统一交给 interactive 层处理。
+        return handleCardAction(action, interactiveDeps)
+      },
+      log,
+    })
+
+    log("info", "飞书插件已初始化", {
+      appId: resolvedConfig.appId.slice(0, 8) + "...",
+      botOpenId,
+    })
+  } catch (err) {
+    // 捕获所有初始化错误，防止插件抛错导致 OpenCode Agent 崩溃（返回 503）
+    log("error", "飞书插件初始化失败，已降级为不影响主流程的无操作模式", {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    })
+    // gateway 保持为 null，所有 hooks 都会自动跳过处理
   }
-
-  // 启动飞书 WebSocket 网关（复用 larkClient）
-  // workspaceRoots 从 feishu.json 读取，缺失时回退到 [resolvedConfig.directory]
-  const workspaceRoots = resolveWorkspaceRoots(resolvedConfig)
-  log("info", "workspaceRoots 已加载", { count: workspaceRoots.length, roots: workspaceRoots })
-
-  gateway = startFeishuGateway({
-    config: resolvedConfig,
-    larkClient,
-    botOpenId,
-    onMessage: async (msgCtx) => {
-      // 网关未完成初始化或消息为空时，不进入主处理链路。
-      if (!msgCtx.content.trim() || !gateway) return
-      await enqueueMessage(msgCtx, {
-        config: resolvedConfig,
-        client,
-        feishuClient: larkClient,
-        log,
-        directory: resolvedConfig.directory,
-        cardkit,
-        interactiveDeps,
-        v2Client,
-        workspaceRoots,
-        larkClient,
-      })
-    },
-    onBotAdded: (chatId) => {
-      if (!gateway) return
-      // Bot 刚入群时：异步补录历史消息 + 主动发送欢迎卡片
-      ingestGroupHistory(larkClient, client, chatId, {
-        maxMessages: resolvedConfig.maxHistoryMessages,
-        log,
-        directory: resolvedConfig.directory,
-      }).catch((err) => {
-        log("error", "群聊历史摄入失败", {
-          chatId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-      // 发送欢迎消息：引导用户 /dir 绑定工程
-      sendWelcomeCard(larkClient, chatId, workspaceRoots, log).catch((err) => {
-        log("error", "发送欢迎消息失败", {
-          chatId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-    },
-    onCardAction: async (action) => {
-      if (!gateway) return
-      // 交互按钮统一交给 interactive 层处理。
-      return handleCardAction(action, interactiveDeps)
-    },
-    log,
-  })
-
-  log("info", "飞书插件已初始化", {
-    appId: resolvedConfig.appId.slice(0, 8) + "...",
-    botOpenId,
-  })
 
   const hooks: Hooks = {
     event: async ({ event }) => {
       // 只有网关可用时才消费 OpenCode SSE 事件。
-      if (!gateway) return
+      if (!gateway || !resolvedConfig) return
       await handleEvent(event, {
         log,
         directory: resolvedConfig.directory,
@@ -376,12 +379,13 @@ export const FeishuPlugin: Plugin = async (ctx) => {
         larkClient, // PR2: 全局事件路由需要
       })
     },
-    tool: {
-      feishu_send_card: createSendCardTool({ feishuClient: larkClient, log }),
+    tool: larkClient ? {
+      feishu_send_card: createSendCardTool({ feishuClient: larkClient, log }),  
       feishu_request_form: createRequestFormTool({ feishuClient: larkClient, log }),
-    },
+    } : {},
     "experimental.chat.system.transform": async (input, output) => {
       // 仅在飞书会话中注入最小运行时 prompt，非飞书会话不干扰 agent
+      if (!gateway || !resolvedConfig) return
       if (!input.sessionID || !getChatIdBySession(input.sessionID)) return
       output.system.push(feishuRuntimePrompt)
 
