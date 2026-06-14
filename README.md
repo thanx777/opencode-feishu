@@ -338,6 +338,17 @@ curl -u "opencode:password" -X POST "http://localhost:4096/session?directory=<wo
 
 绑定存储在内存中，重启即清空。重新 `/dir <name>` 即可。24 小时无活动也会自动过期。
 
+### Q: 桌面端/Web UI 报 503 Service Unavailable？
+
+```
+无法重新加载 xxx
+opencode server GET http://127.0.0.1:5484/agent?directory=... → 503 Service Unavailable
+```
+
+**原因**：OpenCode 配置中引用了一个不存在的工作区目录。当客户端尝试加载该工作区时，server 无法初始化 agent，返回 503。
+
+**解决方法**：在 OpenCode 客户端中删除该工作区引用（在项目列表中移除不存在的目录）。如果无法操作客户端，检查 `~/.config/opencode/` 下的配置文件，确认所有引用的目录路径都存在。
+
 ### Q: `/model` 切换模型后 AI 仍说自己是 deepseek？
 
 `opencode` provider 的免费模型（如 `minimax-m3-free`、`deepseek-v4-flash-free`）底层可能共享同一个 API 端点，实际调用的可能是 deepseek 的模型。这是 OpenCode 的 provider 路由行为，不是插件的 bug。`/model` 切换确实生效了（可通过 `FEISHU_DEBUG=1` 日志确认 `providerID` 和 `modelID` 已变更），但 AI 自身无法感知被路由到了哪个底层模型。如需使用不同底层模型，可切换到 `nvidia` 或 `github-copilot` 等其他 provider。
